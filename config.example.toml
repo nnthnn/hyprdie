@@ -1,0 +1,19 @@
+# Copy to ~/.config/hyprdie/config.toml
+
+[ui]
+title = "Shutting down..."
+# Supports PNG, JPEG, WebP, etc. Relative paths are resolved from the working directory.
+background = "~/Pictures/shutdown.png"
+
+[behavior]
+poll_interval_ms = 150
+retry_interval_ms = 5000
+dry_run = false
+no_exit = false
+
+[commands]
+# post = "systemctl poweroff"
+
+# CLI overrides are also available:
+# hyprdie --dry-run
+# hyprdie --post-cmd 'systemctl reboot'
