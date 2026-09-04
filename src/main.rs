@@ -105,6 +105,7 @@ struct Client {
 }
 struct ShutdownState {
     pids: HashSet<i32>,
+    hypr_children: HashSet<i32>,
     addresses: Vec<String>,
     apps: Vec<(String, String)>,
     last_retry: Instant,
@@ -137,6 +138,8 @@ fn hyprctl(args: &[&str]) -> Result<String, String> {
         Err(String::from_utf8_lossy(&o.stderr).into())
     }
 }
+const IGNORE_DAEMONS: &[&str] = &["Xwayland"];
+
 fn descendants_of(root: i32) -> HashSet<i32> {
     let mut found = HashSet::new();
     let mut pending = vec![root];
@@ -151,16 +154,25 @@ fn descendants_of(root: i32) -> HashSet<i32> {
             let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
                 continue;
             };
-            let Some(end) = stat.rfind(')') else { continue };
+            let (Some(open), Some(end)) = (stat.find('('), stat.rfind(')')) else {
+                continue;
+            };
+            let comm = &stat[open + 1..end];
             let fields: Vec<_> = stat[end + 2..].split_whitespace().collect();
-            if fields.get(1).and_then(|v| v.parse().ok()) == Some(parent) && found.insert(pid) {
+            if fields.get(1).and_then(|v| v.parse().ok()) != Some(parent) {
+                continue;
+            }
+            if IGNORE_DAEMONS.contains(&comm) {
+                continue;
+            }
+            if found.insert(pid) {
                 pending.push(pid);
             }
         }
     }
     found
 }
-fn begin_shutdown(state: &mut ShutdownState) {
+fn refresh_clients(state: &mut ShutdownState) {
     let Ok(raw) = hyprctl(&["-j", "clients"]) else {
         return;
     };
@@ -169,6 +181,7 @@ fn begin_shutdown(state: &mut ShutdownState) {
     };
     state.addresses = clients.iter().filter_map(|c| c.address.clone()).collect();
     state.pids = clients.iter().filter_map(|c| c.pid).collect();
+    state.pids.extend(&state.hypr_children);
     state.apps = clients
         .iter()
         .filter_map(|c| {
@@ -181,16 +194,20 @@ fn begin_shutdown(state: &mut ShutdownState) {
             }
         })
         .collect();
+}
+
+fn begin_shutdown(state: &mut ShutdownState) {
     if let Ok(raw) = hyprctl(&["-j", "instances"]) {
         if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
             if let Some(pid) = items
                 .iter()
                 .find_map(|i| i.get("pid").and_then(|v| v.as_i64()).map(|p| p as i32))
             {
-                state.pids.extend(descendants_of(pid));
+                state.hypr_children = descendants_of(pid);
             }
         }
     }
+    refresh_clients(state);
     if !state.config.behavior.dry_run {
         retry_close(state);
     }
@@ -326,6 +343,7 @@ struct Ui {
     first_configure: bool,
     image: Option<DynamicImage>,
     apps: Vec<(String, String)>,
+    count: usize,
     title: String,
     font: Option<FontVec>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -339,15 +357,23 @@ impl Ui {
     fn output_size(&self) -> Option<(u32, u32)> {
         for output in self.output_state.outputs() {
             if let Some(info) = self.output_state.info(&output) {
-                let (w, h) = info.physical_size;
-                if w > 0 && h > 0 {
-                    return Some((w as u32, h as u32));
+                if let Some((w, h)) = info.logical_size {
+                    let scale = info.scale_factor.max(1) as u32;
+                    if w > 0 && h > 0 {
+                        return Some((w as u32 * scale, h as u32 * scale));
+                    }
+                }
+                if let Some(mode) = info.modes.iter().find(|m| m.current) {
+                    let (w, h) = mode.dimensions;
+                    if w > 0 && h > 0 {
+                        return Some((w as u32, h as u32));
+                    }
                 }
             }
         }
         None
     }
-    fn draw(&mut self, _qh: &QueueHandle<Self>) {
+    fn draw(&mut self) {
         let (width, height) = if self.width > 1 && self.height > 1 {
             (self.width, self.height)
         } else {
@@ -366,7 +392,7 @@ impl Ui {
         };
         if let Some(image) = &self.image {
             let scaled = image
-                .resize_to_fill(width, height, FilterType::Lanczos3)
+                .resize_to_fill(width, height, FilterType::Triangle)
                 .to_rgba8();
             for (chunk, pixel) in canvas.chunks_exact_mut(4).zip(scaled.pixels()) {
                 chunk.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
@@ -383,10 +409,11 @@ impl Ui {
             const DIM: (u8, u8, u8) = (128, 128, 128);
             let mut lines: Vec<(String, f32, f32, (u8, u8, u8))> =
                 vec![(self.title.clone(), 44.0, 60.0, WHITE)];
+            let noun = if self.count == 1 { "app" } else { "apps" };
             let header = if dry_run {
-                "Dry run — apps that would be closed:"
+                format!("Dry run — {} {noun} would be closed:", self.count)
             } else {
-                "Waiting for these apps to close:"
+                format!("Waiting for {} {noun} to close:", self.count)
             };
             lines.push((header.to_string(), 24.0, 36.0, WHITE));
             for (class, title) in &self.apps {
@@ -452,15 +479,24 @@ impl Ui {
         }
         self.last_poll = Instant::now();
         let mut state = self.shared.lock().unwrap();
-        if state.config.behavior.dry_run {
-            return;
+        refresh_clients(&mut state);
+        if !state.config.behavior.dry_run {
+            if alive(&state.pids) == 0 {
+                drop(state);
+                self.finish(false);
+                return;
+            }
+            if state.last_retry.elapsed() >= self.retry {
+                retry_close(&state);
+                state.last_retry = Instant::now();
+            }
         }
-        if alive(&state.pids) == 0 {
-            drop(state);
-            self.finish(false);
-        } else if state.last_retry.elapsed() >= self.retry {
-            retry_close(&state);
-            state.last_retry = Instant::now();
+        let apps = state.apps.clone();
+        drop(state);
+        if apps != self.apps {
+            self.apps = apps;
+            self.count = self.apps.len();
+            self.draw();
         }
     }
 }
@@ -482,9 +518,7 @@ impl CompositorHandler for Ui {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.draw(qh);
-    }
+    fn frame(&mut self, _: &Connection, _qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
     fn surface_enter(
         &mut self,
         _: &Connection,
@@ -517,7 +551,7 @@ impl LayerShellHandler for Ui {
     fn configure(
         &mut self,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
@@ -531,7 +565,7 @@ impl LayerShellHandler for Ui {
         }
         if self.first_configure {
             self.first_configure = false;
-            self.draw(qh);
+            self.draw();
         }
     }
 }
@@ -652,6 +686,7 @@ fn main() {
     let retry = config.behavior.retry_interval_ms.max(interval);
     let shared = Arc::new(Mutex::new(ShutdownState {
         pids: HashSet::new(),
+        hypr_children: HashSet::new(),
         addresses: Vec::new(),
         apps: Vec::new(),
         last_retry: Instant::now(),
@@ -665,7 +700,7 @@ fn main() {
     let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr layer shell is not available");
     let shm = Shm::bind(&globals, &qh).expect("wl_shm is not available");
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Top, Some("hyprdie"), None);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("hyprdie"), None);
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     layer.commit();
@@ -693,24 +728,32 @@ fn main() {
     let mut event_loop = EventLoop::<Ui>::try_new().expect("could not create event loop");
     let stop = event_loop.get_signal();
     begin_shutdown(&mut shared.lock().unwrap());
+    let apps = shared.lock().unwrap().apps.clone();
+    let count = apps.len();
+    let font = load_font();
+    let pool = SlotPool::new(32 * 1024 * 1024, &shm).expect("could not create SHM pool");
+    let registry_state = RegistryState::new(&globals);
+    let seat_state = SeatState::new(&globals, &qh);
+    let output_state = OutputState::new(&globals, &qh);
     let mut ui = Ui {
         shared: shared.clone(),
         interval: Duration::from_millis(interval),
         retry: Duration::from_millis(retry),
         last_poll: Instant::now() - Duration::from_millis(interval),
         layer,
-        pool: SlotPool::new(32 * 1024 * 1024, &shm).expect("could not create SHM pool"),
+        pool,
         width: 1,
         height: 1,
         first_configure: true,
         image,
-        apps: shared.lock().unwrap().apps.clone(),
+        apps,
+        count,
         title: config.ui.title.clone(),
-        font: load_font(),
+        font,
         keyboard: None,
-        registry_state: RegistryState::new(&globals),
-        seat_state: SeatState::new(&globals, &qh),
-        output_state: OutputState::new(&globals, &qh),
+        registry_state,
+        seat_state,
+        output_state,
         shm,
         stop,
     };
