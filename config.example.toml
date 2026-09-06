@@ -8,6 +8,8 @@ background = "~/Pictures/shutdown.png"
 [behavior]
 poll_interval_ms = 150
 retry_interval_ms = 5000
+# SIGTERM is sent first; if an app is still alive after this long, escalate to SIGKILL.
+sigkill_timeout_ms = 10000
 dry_run = false
 no_exit = false
 

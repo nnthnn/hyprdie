@@ -6,7 +6,7 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 
 - [x] Live app list: re-poll `hyprctl -j clients` each tick so closed apps
       disappear, and show an "N apps remaining" counter in the header.
-- [ ] Graceful force-kill escalation: `SIGTERM`, then `SIGKILL` after a
+- [x] Graceful force-kill escalation: `SIGTERM`, then `SIGKILL` after a
       configurable per-app timeout, instead of waiting forever for the `F` key.
 - [ ] Close layer-shell surfaces too (bars/notifications) via
       `hyprctl -j layers`, matching hyprshutdown.
@@ -41,3 +41,5 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 - [x] Keyboard hint line (`ESC` cancel, `F` force quit).
 - [x] Close apps via `closewindow` + `SIGTERM`, retry loop, then
       `hyprctl dispatch exit` and run the post command.
+- [x] Graceful force-kill escalation: `SIGTERM`, then `SIGKILL` after a
+      configurable per-app timeout (`behavior.sigkill_timeout_ms`).

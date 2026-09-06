@@ -28,7 +28,7 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -60,6 +60,7 @@ struct UiConfig {
 struct BehaviorConfig {
     poll_interval_ms: u64,
     retry_interval_ms: u64,
+    sigkill_timeout_ms: u64,
     dry_run: bool,
     no_exit: bool,
 }
@@ -90,6 +91,7 @@ impl Default for BehaviorConfig {
         Self {
             poll_interval_ms: 150,
             retry_interval_ms: 5_000,
+            sigkill_timeout_ms: 10_000,
             dry_run: false,
             no_exit: false,
         }
@@ -109,6 +111,7 @@ struct ShutdownState {
     addresses: Vec<String>,
     apps: Vec<(String, String)>,
     last_retry: Instant,
+    term_started: HashMap<i32, Instant>,
     config: Config,
 }
 
@@ -212,12 +215,21 @@ fn begin_shutdown(state: &mut ShutdownState) {
         retry_close(state);
     }
 }
-fn retry_close(state: &ShutdownState) {
+fn retry_close(state: &mut ShutdownState) {
     for address in &state.addresses {
         let _ = hyprctl(&["dispatch", "closewindow", &format!("address:{address}")]);
     }
+    let now = Instant::now();
+    let timeout = Duration::from_millis(state.config.behavior.sigkill_timeout_ms);
     for pid in &state.pids {
-        let _ = kill(Pid::from_raw(*pid), Signal::SIGTERM);
+        let Some(started) = state.term_started.get(pid) else {
+            let _ = kill(Pid::from_raw(*pid), Signal::SIGTERM);
+            state.term_started.insert(*pid, now);
+            continue;
+        };
+        if now.duration_since(*started) >= timeout {
+            let _ = kill(Pid::from_raw(*pid), Signal::SIGKILL);
+        }
     }
 }
 fn alive(pids: &HashSet<i32>) -> usize {
@@ -487,7 +499,7 @@ impl Ui {
                 return;
             }
             if state.last_retry.elapsed() >= self.retry {
-                retry_close(&state);
+                retry_close(&mut state);
                 state.last_retry = Instant::now();
             }
         }
@@ -690,6 +702,7 @@ fn main() {
         addresses: Vec::new(),
         apps: Vec::new(),
         last_retry: Instant::now(),
+        term_started: HashMap::new(),
         config: config.clone(),
     }));
     let conn = Connection::connect_to_env().expect("could not connect to Wayland");
@@ -783,5 +796,6 @@ mod tests {
     fn defaults_are_sensible() {
         assert_eq!(Config::default().ui.title, "Shutting down...");
         assert_eq!(Config::default().behavior.poll_interval_ms, 150);
+        assert_eq!(Config::default().behavior.sigkill_timeout_ms, 10_000);
     }
 }
