@@ -478,12 +478,16 @@ impl Ui {
             for pid in &state.pids {
                 let _ = kill(Pid::from_raw(*pid), Signal::SIGKILL);
             }
-        } else if !state.config.behavior.no_exit {
-            let _ = hyprctl(&["dispatch", "exit"]);
-        }
-        if !force {
+        } else {
+            // Run the post command *before* exiting Hyprland: commands like
+            // `systemctl reboot` need the session to still be active when they
+            // ask logind/polkit for authorization, and teardown races it if we
+            // exit first.
             if let Some(command) = &state.config.commands.post {
                 let _ = Command::new("sh").args(["-c", command]).spawn();
+            }
+            if !state.config.behavior.no_exit {
+                let _ = hyprctl(&["dispatch", "exit"]);
             }
         }
         self.stop.stop();
