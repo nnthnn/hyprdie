@@ -5,7 +5,7 @@ use calloop::{
 use calloop_wayland_source::WaylandSource;
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use image::{DynamicImage, ImageReader, imageops::FilterType};
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{SigHandler, Signal, kill, signal};
 use nix::unistd::Pid;
 use serde::Deserialize;
 use smithay_client_toolkit::{
@@ -185,6 +185,9 @@ fn refresh_clients(state: &mut ShutdownState) {
     state.addresses = clients.iter().filter_map(|c| c.address.clone()).collect();
     state.pids = clients.iter().filter_map(|c| c.pid).collect();
     state.pids.extend(&state.hypr_children);
+    // Never target ourselves: we run inside the session (and thus the Hyprland
+    // process tree) that we're tearing down, so the ppid walk includes us.
+    state.pids.remove(&(process::id() as i32));
     state.apps = clients
         .iter()
         .filter_map(|c| {
@@ -683,6 +686,12 @@ delegate_layer!(Ui);
 delegate_registry!(Ui);
 
 fn main() {
+    // Closing our launching terminal (a Wayland client) hangs up the pty and
+    // sends SIGHUP to its foreground process group — which includes us. Ignore
+    // it so we survive long enough to reach finish() and run the post command.
+    unsafe {
+        let _ = signal(Signal::SIGHUP, SigHandler::SigIgn);
+    }
     let options = cli_options();
     let mut config = load_config(&config_path()).unwrap_or_else(|e| {
         eprintln!("warning: {e}; using defaults");
