@@ -8,18 +8,18 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
       disappear, and show an "N apps remaining" counter in the header.
 - [x] Graceful force-kill escalation: `SIGTERM`, then `SIGKILL` after a
       configurable per-app timeout, instead of waiting forever for the `F` key.
-- [ ] Close layer-shell surfaces too (bars/notifications) via
+- [x] Close layer-shell surfaces too (bars/notifications) via
       `hyprctl -j layers`, matching hyprshutdown.
-- [ ] Robust process discovery: use the systemd cgroup for the Hyprland
+- [x] Robust process discovery: use the systemd cgroup for the Hyprland
       session instead of the `/proc` ppid walk (which can miss apps).
-- [ ] Hyprland guard: check `HYPRLAND_INSTANCE_SIGNATURE` and fail with a
+- [x] Hyprland guard: check `HYPRLAND_INSTANCE_SIGNATURE` and fail with a
       clear message when not running under Hyprland.
 
 ## Later
 
 - [ ] Multi-monitor: one layer surface per output (currently a single surface
       sized to the first output).
-- [ ] Config flexibility: `--config <path>` flag, honor `$XDG_CONFIG_HOME`,
+- [x] Config flexibility: `--config <path>` flag, honor `$XDG_CONFIG_HOME`,
       make text colors configurable instead of hardcoded constants.
 - [ ] Post-command sequencing: add a `--vt N` equivalent for the NVIDIA+SDDM
       black-screen workaround.
@@ -29,7 +29,8 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 - [ ] README: usage, config reference, and a Hyprland keybind example.
 - [ ] Install script / packaging (e.g. `cargo install` instructions, systemd).
 - [ ] `cargo fmt` + `clippy` clean, and add unit tests for config/CLI parsing,
-      `descendants_of`, and text measurement.
+      process discovery (`session_descendants`/`ppid_descendants`), and text
+      measurement.
 
 ## Done
 

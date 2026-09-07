@@ -1,9 +1,9 @@
+use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use calloop::{
     EventLoop, LoopSignal,
     timer::{TimeoutAction, Timer},
 };
 use calloop_wayland_source::WaylandSource;
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use image::{DynamicImage, ImageReader, imageops::FilterType};
 use nix::sys::signal::{SigHandler, Signal, kill, signal};
 use nix::unistd::Pid;
@@ -54,6 +54,7 @@ struct Config {
 struct UiConfig {
     title: String,
     background: Option<String>,
+    colors: UiColors,
 }
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -69,6 +70,66 @@ struct BehaviorConfig {
 struct CommandConfig {
     post: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl Rgb {
+    const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    fn rgb(self) -> (u8, u8, u8) {
+        (self.r, self.g, self.b)
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgb {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let hex = String::deserialize(deserializer)?;
+        let digits = hex.trim_start_matches('#');
+        if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom(
+                "expected a color in `#rrggbb` form",
+            ));
+        }
+        let value = u32::from_str_radix(digits, 16).map_err(serde::de::Error::custom)?;
+        Ok(Rgb {
+            r: (value >> 16) as u8,
+            g: (value >> 8) as u8,
+            b: value as u8,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(default)]
+struct UiColors {
+    title: Rgb,
+    heading: Rgb,
+    app: Rgb,
+    hint: Rgb,
+    background: Rgb,
+}
+
+impl Default for UiColors {
+    fn default() -> Self {
+        Self {
+            title: Rgb::new(0xff, 0xff, 0xff),
+            heading: Rgb::new(0xff, 0xff, 0xff),
+            app: Rgb::new(0xac, 0xb5, 0xc7),
+            hint: Rgb::new(0x80, 0x80, 0x80),
+            background: Rgb::new(0x1b, 0x18, 0x18),
+        }
+    }
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -81,8 +142,9 @@ impl Default for Config {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            title: "Shutting down...".into(),
+            title: "Ending session...".into(),
             background: None,
+            colors: UiColors::default(),
         }
     }
 }
@@ -104,6 +166,17 @@ struct Client {
     pid: Option<i32>,
     class: Option<String>,
     title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyprLayer {
+    #[serde(default)]
+    pid: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonitorLayers {
+    levels: HashMap<String, Vec<HyprLayer>>,
 }
 struct ShutdownState {
     pids: HashSet<i32>,
@@ -143,7 +216,73 @@ fn hyprctl(args: &[&str]) -> Result<String, String> {
 }
 const IGNORE_DAEMONS: &[&str] = &["Xwayland"];
 
-fn descendants_of(root: i32) -> HashSet<i32> {
+fn is_ignored_daemon(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|comm| IGNORE_DAEMONS.contains(&comm.trim()))
+        .unwrap_or(false)
+}
+
+/// Extract the cgroup path from the contents of `/proc/<pid>/cgroup`.
+fn parse_cgroup(text: &str) -> Option<String> {
+    // Each line is "<hierarchy-id>:<controllers>:<path>". The cgroups v2 unified
+    // hierarchy has a single "0::<path>" line (controllers empty); v1 has one
+    // line per controller with a non-empty controller list.
+    let mut fallback: Option<String> = None;
+    for line in text.lines() {
+        let Some(rest) = line.split_once(':').map(|(_, r)| r) else {
+            continue;
+        };
+        let Some((controllers, path)) = rest.split_once(':') else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        if controllers.is_empty() {
+            return Some(path.to_string());
+        }
+        fallback.get_or_insert_with(|| path.to_string());
+    }
+    fallback
+}
+
+fn cgroup_path(pid: i32) -> Option<String> {
+    parse_cgroup(&fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
+}
+
+/// Find the processes to tear down along with the session.
+///
+/// Prefer enumerating the systemd session cgroup: unlike a ppid walk it still
+/// catches processes that daemonized and were re-parented away from Hyprland.
+/// Falls back to the ppid walk when there's no usable cgroup (e.g. no systemd).
+fn session_descendants(root: i32) -> HashSet<i32> {
+    if let Some(cgroup) = cgroup_path(root).filter(|c| c != "/") {
+        let prefix = format!("{cgroup}/");
+        let mut found = HashSet::new();
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                    continue;
+                };
+                if pid == root || is_ignored_daemon(pid) {
+                    continue;
+                }
+                let Some(path) = cgroup_path(pid) else {
+                    continue;
+                };
+                if path == cgroup || path.starts_with(&prefix) {
+                    found.insert(pid);
+                }
+            }
+        }
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    ppid_descendants(root)
+}
+
+fn ppid_descendants(root: i32) -> HashSet<i32> {
     let mut found = HashSet::new();
     let mut pending = vec![root];
     while let Some(parent) = pending.pop() {
@@ -182,11 +321,21 @@ fn refresh_clients(state: &mut ShutdownState) {
     let Ok(clients) = serde_json::from_str::<Vec<Client>>(&raw) else {
         return;
     };
+
     state.addresses = clients.iter().filter_map(|c| c.address.clone()).collect();
     state.pids = clients.iter().filter_map(|c| c.pid).collect();
     state.pids.extend(&state.hypr_children);
-    // Never target ourselves: we run inside the session (and thus the Hyprland
-    // process tree) that we're tearing down, so the ppid walk includes us.
+
+    // Layer-shell surfaces (bars, notifications, launchers, ...) have no toplevel
+    // window, so they never show up in `hyprctl clients`. Close their client
+    // processes too, matching hyprshutdown. This is best-effort: a failure must
+    // not discard the client state already collected above.
+    if let Ok(layers_raw) = hyprctl(&["-j", "layers"]) {
+        state.pids.extend(collect_layer_pids(&layers_raw));
+    }
+
+    // Never target ourselves: we run inside the session that we're tearing
+    // down, so the process-discovery pass includes us.
     state.pids.remove(&(process::id() as i32));
     state.apps = clients
         .iter()
@@ -202,6 +351,20 @@ fn refresh_clients(state: &mut ShutdownState) {
         .collect();
 }
 
+fn collect_layer_pids(raw: &str) -> HashSet<i32> {
+    // `hyprctl -j layers` is keyed by monitor name:
+    // { "<monitor>": { "levels": { "0": [ { .., "pid": N }, .. ], .. } } }.
+    let Ok(by_monitor) = serde_json::from_str::<HashMap<String, MonitorLayers>>(raw) else {
+        return HashSet::new();
+    };
+    by_monitor
+        .values()
+        .flat_map(|monitor| monitor.levels.values())
+        .flatten()
+        .filter_map(|layer| layer.pid)
+        .collect()
+}
+
 fn begin_shutdown(state: &mut ShutdownState) {
     if let Ok(raw) = hyprctl(&["-j", "instances"]) {
         if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
@@ -209,7 +372,7 @@ fn begin_shutdown(state: &mut ShutdownState) {
                 .iter()
                 .find_map(|i| i.get("pid").and_then(|v| v.as_i64()).map(|p| p as i32))
             {
-                state.hypr_children = descendants_of(pid);
+                state.hypr_children = session_descendants(pid);
             }
         }
     }
@@ -318,6 +481,7 @@ fn blend_text(
 struct CliOptions {
     dry_run: bool,
     post_command: Option<String>,
+    config_path: Option<PathBuf>,
 }
 fn cli_options() -> CliOptions {
     let mut options = CliOptions::default();
@@ -331,13 +495,19 @@ fn cli_options() -> CliOptions {
                     process::exit(2)
                 })
             }
+            "--config" => {
+                options.config_path = args.next().map(PathBuf::from).or_else(|| {
+                    eprintln!("--config requires a path");
+                    process::exit(2)
+                })
+            }
             "--help" | "-h" => {
-                println!("Usage: hyprdie [--dry-run] [--post-cmd COMMAND]");
+                println!("Usage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]");
                 process::exit(0);
             }
             unknown => {
                 eprintln!(
-                    "unknown option: {unknown}\nUsage: hyprdie [--dry-run] [--post-cmd COMMAND]"
+                    "unknown option: {unknown}\nUsage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]"
                 );
                 process::exit(2);
             }
@@ -392,11 +562,16 @@ impl Ui {
         let (width, height) = if self.width > 1 && self.height > 1 {
             (self.width, self.height)
         } else {
-            self.output_size().unwrap_or((self.width.max(1), self.height.max(1)))
+            self.output_size()
+                .unwrap_or((self.width.max(1), self.height.max(1)))
         };
         self.width = width;
         self.height = height;
         let stride = width as i32 * 4;
+        let (dry_run, colors) = {
+            let state = self.shared.lock().unwrap();
+            (state.config.behavior.dry_run, state.config.ui.colors)
+        };
         let Ok((buffer, mut canvas)) = self.pool.create_buffer(
             width as i32,
             height as i32,
@@ -413,24 +588,30 @@ impl Ui {
                 chunk.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }
         } else {
+            let solid = [
+                colors.background.r,
+                colors.background.g,
+                colors.background.b,
+                0xff,
+            ];
             for chunk in canvas.chunks_exact_mut(4) {
-                chunk.copy_from_slice(&[0x1b, 0x18, 0x18, 0xff]);
+                chunk.copy_from_slice(&solid);
             }
         }
         if let Some(font) = &self.font {
-            let dry_run = self.shared.lock().unwrap().config.behavior.dry_run;
-            const WHITE: (u8, u8, u8) = (255, 255, 255);
-            const MUTED: (u8, u8, u8) = (172, 181, 199);
-            const DIM: (u8, u8, u8) = (128, 128, 128);
+            let title_color = colors.title.rgb();
+            let heading_color = colors.heading.rgb();
+            let app_color = colors.app.rgb();
+            let hint_color = colors.hint.rgb();
             let mut lines: Vec<(String, f32, f32, (u8, u8, u8))> =
-                vec![(self.title.clone(), 44.0, 60.0, WHITE)];
+                vec![(self.title.clone(), 44.0, 60.0, title_color)];
             let noun = if self.count == 1 { "app" } else { "apps" };
             let header = if dry_run {
                 format!("Dry run — {} {noun} would be closed:", self.count)
             } else {
                 format!("Waiting for {} {noun} to close:", self.count)
             };
-            lines.push((header.to_string(), 24.0, 36.0, WHITE));
+            lines.push((header.to_string(), 24.0, 36.0, heading_color));
             for (class, title) in &self.apps {
                 let line = if title.is_empty() {
                     class.clone()
@@ -439,15 +620,27 @@ impl Ui {
                 } else {
                     format!("{class} — {title}")
                 };
-                lines.push((line, 20.0, 30.0, MUTED));
+                lines.push((line, 20.0, 30.0, app_color));
             }
-            let block_height: f32 = lines.iter().map(|(_, _, line_height, _)| *line_height).sum();
+            let block_height: f32 = lines
+                .iter()
+                .map(|(_, _, line_height, _)| *line_height)
+                .sum();
             let mut y = (height as f32 - block_height) / 2.0;
             for (text, size, line_height, color) in &lines {
                 let line_width = measure_text(font, text, *size);
                 let x = (width as f32 - line_width) / 2.0;
                 y = blend_text(
-                    &mut canvas, width, height, font, text, x, y, *size, *line_height, *color,
+                    &mut canvas,
+                    width,
+                    height,
+                    font,
+                    text,
+                    x,
+                    y,
+                    *size,
+                    *line_height,
+                    *color,
                 );
             }
             let hint = if dry_run {
@@ -459,7 +652,16 @@ impl Ui {
             let hint_x = (width as f32 - measure_text(font, &hint, hint_size)) / 2.0;
             let hint_y = height as f32 - 40.0;
             blend_text(
-                &mut canvas, width, height, font, &hint, hint_x, hint_y, hint_size, 0.0, DIM,
+                &mut canvas,
+                width,
+                height,
+                font,
+                &hint,
+                hint_x,
+                hint_y,
+                hint_size,
+                0.0,
+                hint_color,
             );
         }
         self.layer
@@ -537,7 +739,14 @@ impl CompositorHandler for Ui {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(&mut self, _: &Connection, _qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(
+        &mut self,
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+    }
     fn surface_enter(
         &mut self,
         _: &Connection,
@@ -690,6 +899,13 @@ delegate_layer!(Ui);
 delegate_registry!(Ui);
 
 fn main() {
+    // Check that we're actually running under Hyprland
+    if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_err() {
+        eprintln!("Error: HYPRLAND_INSTANCE_SIGNATURE not found. Are you running under Hyprland?");
+        eprintln!("hyprdie must be run from within a Hyprland session.");
+        process::exit(1);
+    }
+
     // Closing our launching terminal (a Wayland client) hangs up the pty and
     // sends SIGHUP to its foreground process group — which includes us. Ignore
     // it so we survive long enough to reach finish() and run the post command.
@@ -697,7 +913,8 @@ fn main() {
         let _ = signal(Signal::SIGHUP, SigHandler::SigIgn);
     }
     let options = cli_options();
-    let mut config = load_config(&config_path()).unwrap_or_else(|e| {
+    let config_file = options.config_path.clone().unwrap_or_else(config_path);
+    let mut config = load_config(&config_file).unwrap_or_else(|e| {
         eprintln!("warning: {e}; using defaults");
         Config::default()
     });
@@ -726,7 +943,8 @@ fn main() {
     let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr layer shell is not available");
     let shm = Shm::bind(&globals, &qh).expect("wl_shm is not available");
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("hyprdie"), None);
+    let layer =
+        layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("hyprdie"), None);
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     layer.commit();
@@ -807,8 +1025,83 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_are_sensible() {
-        assert_eq!(Config::default().ui.title, "Shutting down...");
+        assert_eq!(Config::default().ui.title, "Ending session...");
         assert_eq!(Config::default().behavior.poll_interval_ms, 150);
         assert_eq!(Config::default().behavior.sigkill_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn parses_cgroup_v2_unified() {
+        assert_eq!(
+            parse_cgroup("0::/user.slice/user-1000.slice/session-2.scope\n").as_deref(),
+            Some("/user.slice/user-1000.slice/session-2.scope")
+        );
+    }
+
+    #[test]
+    fn parses_cgroup_v1_controller_line() {
+        assert_eq!(
+            parse_cgroup("11:memory:/user.slice/user-1000.slice/session-2.scope\n").as_deref(),
+            Some("/user.slice/user-1000.slice/session-2.scope")
+        );
+    }
+
+    #[test]
+    fn root_cgroup_parses_as_slash() {
+        assert_eq!(parse_cgroup("0::/\n").as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn parses_color_hex() {
+        let colors: UiColors = toml::from_str("title = \"#ff8000\"").unwrap();
+        assert_eq!(
+            colors.title,
+            Rgb {
+                r: 0xff,
+                g: 0x80,
+                b: 0x00
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_color() {
+        assert!(toml::from_str::<UiColors>("title = \"#12\"").is_err());
+        assert!(toml::from_str::<UiColors>("title = \"#zzzzzz\"").is_err());
+    }
+
+    #[test]
+    fn parses_config_colors_with_defaults() {
+        let config: Config = toml::from_str(
+            r##"
+            [ui.colors]
+            title = "#ff0000"
+            "##,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ui.colors.title,
+            Rgb {
+                r: 0xff,
+                g: 0x00,
+                b: 0x00
+            }
+        );
+        assert_eq!(
+            config.ui.colors.hint,
+            Rgb {
+                r: 0x80,
+                g: 0x80,
+                b: 0x80
+            }
+        );
+        assert_eq!(
+            config.ui.colors.background,
+            Rgb {
+                r: 0x1b,
+                g: 0x18,
+                b: 0x18
+            }
+        );
     }
 }

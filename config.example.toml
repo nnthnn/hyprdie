@@ -1,9 +1,18 @@
 # Copy to ~/.config/hyprdie/config.toml
 
 [ui]
-title = "Shutting down..."
+title = "Ending session..."
 # Supports PNG, JPEG, WebP, etc. Relative paths are resolved from the working directory.
-background = "~/Pictures/shutdown.png"
+# background = "~/Pictures/shutdown.png"
+
+[ui.colors]
+# Colors are #rrggbb hex strings.
+title = "#ffffff"
+heading = "#ffffff"
+app = "#acb5c7"
+hint = "#808080"
+# Solid background used when no background image is set.
+background = "#1b1818"
 
 [behavior]
 poll_interval_ms = 150
@@ -19,3 +28,4 @@ no_exit = false
 # CLI overrides are also available:
 # hyprdie --dry-run
 # hyprdie --post-cmd 'systemctl reboot'
+# hyprdie --config /path/to/config.toml
