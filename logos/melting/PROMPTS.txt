@@ -1,0 +1,48 @@
+Prompts used for the images in logos/melting/concepts.png.
+Format: name | size | seed(s) | prompt
+
+A-tomb | 1024x1024 | 1,2
+A weathered stone tombstone with a skull carved into its face, the skull melting and sagging downward like hot wax, thick drips running down the stone, bold flat vector illustration, two tone bone white and charcoal black, high contrast, centered on a plain dark background, sticker style, no text
+
+B-melt-lc | 1344x768 | 1,2
+The lowercase word 'hyprdie' in heavy chunky rounded letters, melting and dripping downward like hot tar, thick glossy drips sagging from the letterforms, white letters on a near black background, flat vector, bold, high contrast, centered, logo, no other text
+
+B-melt-uc | 1344x768 | 1,2
+The uppercase word 'HYPRDIE' in heavy bold slab letters, melting and dripping downward like molten metal, long drips hanging from the bottoms of the letters, bone white on near black, flat vector, high contrast, centered, logo, no other text
+
+C-tomb-name | 1024x1024 | 1,2
+A rounded arch tombstone with the word 'hyprdie' engraved across it in bold letters, a melting skull dripping down the face of the stone, thick wax like drips, flat vector, two tone, bone white on charcoal, high contrast, centered, plain background
+
+D-melt-pixel | 1024x1024 | 1,2
+Four square blocks in a tight 2x2 grid, the blocks melting and dripping downward like hot wax, the bottom edge dissolving into long vertical drips, flat vector, white shapes on a near black background, two tone, high contrast, centered, minimal, logo, no text
+
+E-skull | 1024x1024 | 1,2
+A skull dissolving and melting downward, the cranium sagging and stretching into long heavy drips, bold flat vector silhouette, bone white on a near black background, two tone, extreme contrast, centered, minimal logo, no text
+
+UC | 1344x768 | 5-12
+The uppercase word 'HYPRDIE' in heavy bold slab letters, melting and dripping downward like molten metal, long drips hanging from the bottoms of the letters, bone white on near black, flat vector, high contrast, centered, logo, no other text
+
+---------------------------------------------------------------------------
+Spray batch — 1024x1024, seeds 1-3 each. Records the prompt behind the shipped
+wordmark, which the earlier list missed.
+
+SP1 | 1024x1024 | 1,2,3
+The uppercase word 'HYPRDIE' written in spray painted graffiti letters, tilted on an upward diagonal rising from lower left to upper right, wet paint dripping from the letters, rough edges, overspray speckle, bone white spray paint on a near black wall, high contrast, centered, no other text
+
+SP2 | 1024x1024 | 1,2,3
+The uppercase word 'HYPRDIE' in a rough military stencil, rotated to rise on an upward diagonal from lower left to upper right, spray paint texture with overspray and drips, single colour bone white on near black, high contrast, no other text
+
+SP3 | 1024x1024 | 1,2,3
+The uppercase word 'HYPRDIE' as a graffiti tag sprayed on a dark wall, the letters climbing upward on a diagonal from lower left to upper right, heavy paint drips hanging down from the letters, spray can feel with overspray haze, white paint on near black, high contrast, no other text
+
+SP4 | 1024x1024 | 1,2,3        <-- SEED 3 IS THE SHIPPED WORDMARK
+A graffiti style logo: a small melting skull followed by the uppercase word 'HYPRDIE', the whole lockup rising on an upward diagonal from lower left to upper right, spray painted with drips and overspray, bone white on near black, high contrast, no other text
+
+---------------------------------------------------------------------------
+Which prompt produced which shipped asset:
+
+  assets/hero.png, assets/background.png          A-tomb, seed 2
+  assets/wordmark-transparent{,-inverted}.png     SP4,    seed 3
+  assets/icon.svg                                 E-skull, seed 2  (traced, then placed in a squircle)
+
+The raw renders those were derived from are in logos/sources/.
