@@ -26,6 +26,9 @@ cargo deny check advisories                        # optional, needs cargo-deny
 ./install-hooks.sh                                 # one-time: enable the git hooks below
 ```
 
+[`justfile`](justfile) wraps these (needs `just`): `just check` is fmt + clippy +
+test, and `just release X.Y.Z` cuts a release. See [Releasing](#releasing).
+
 Run `./install-hooks.sh` once per clone to point `core.hooksPath` at the tracked
 [`.githooks/`](.githooks/). It's repo-level config, so it covers every worktree.
 The `pre-commit` hook auto-formats staged `.rs` files; `pre-push` runs
@@ -37,6 +40,24 @@ Toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust 1.98.1
 Debian, `xkbcommon` on Arch) because `smithay-client-toolkit`'s build script
 `pkg-config`s it. CI runs all three jobs in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml); keep them green.
+
+## Releasing
+
+Cut releases from `main` with the `just` recipe — it's the only safe way to make
+the tag:
+
+```sh
+just release 0.1.0
+```
+
+It refuses unless the tree is clean and `main` matches `origin/main`, bumps
+`version` in `Cargo.toml`, refreshes `Cargo.lock`, runs `just check`, commits as
+`Release X.Y.Z`, then pushes the commit and the annotated `vX.Y.Z` tag. Pushing
+the tag runs [`release.yml`](.github/workflows/release.yml), whose first step
+re-checks that the tag equals the `Cargo.toml` version and fails loudly if they
+diverge. That is exactly the failure the recipe exists to prevent: the tag must
+point at a commit whose `version` it matches, or the workflow publishes nothing.
+Cut a release by hand only if you replicate every step above.
 
 ## Testing
 

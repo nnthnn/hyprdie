@@ -28,6 +28,8 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 
 - [x] Git hooks: `pre-commit` formats staged Rust files, `pre-push` runs the
       fmt/clippy checks CI runs (`./install-hooks.sh` to enable).
+- [x] Release tooling: `just release X.Y.Z` bumps `Cargo.toml`, refreshes
+      `Cargo.lock`, runs the checks, and pushes the tag `release.yml` verifies.
 - [ ] README: usage, config reference, and a Hyprland keybind example.
 - [ ] Install script / packaging (e.g. `cargo install` instructions, systemd).
 - [ ] `cargo fmt` + `clippy` clean, and add unit tests for config/CLI parsing,
