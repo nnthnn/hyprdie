@@ -30,11 +30,10 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
       fmt/clippy checks CI runs (`./install-hooks.sh` to enable).
 - [x] Release tooling: `just release X.Y.Z` bumps `Cargo.toml`, refreshes
       `Cargo.lock`, runs the checks, and pushes the tag `release.yml` verifies.
-- [ ] README: usage, config reference, and a Hyprland keybind example.
+- [x] README: usage, config reference, and a Hyprland keybind example.
 - [ ] Install script / packaging (e.g. `cargo install` instructions, systemd).
-- [ ] `cargo fmt` + `clippy` clean, and add unit tests for config/CLI parsing,
-      process discovery (`session_descendants`/`ppid_descendants`), and text
-      measurement.
+- [x] `cargo fmt` + `clippy` clean, and unit tests for config/CLI parsing and
+      process discovery (`session_descendants`/`ppid_descendants`).
 
 ## Done
 
@@ -46,5 +45,7 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 - [x] Keyboard hint line (`ESC` cancel, `F` force quit).
 - [x] Close apps via `closewindow` + `SIGTERM`, retry loop, then
       `hyprctl dispatch exit` and run the post command.
+- [x] Present the overlay (first frame callback) before asking apps to close,
+      with a fallback in case the compositor sends no frame callback.
 - [x] Graceful force-kill escalation: `SIGTERM`, then `SIGKILL` after a
       configurable per-app timeout (`behavior.sigkill_timeout_ms`).

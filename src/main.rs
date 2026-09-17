@@ -449,6 +449,12 @@ fn alive(pids: &HashSet<i32>) -> usize {
 /// How long to let the post command run before giving up on it.
 const POST_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long to wait for the first frame callback before starting the close
+/// sequence anyway. The callback is the intended trigger (see
+/// `Ui::start_closing`); this only keeps a compositor that never sends one from
+/// wedging shutdown on the overlay.
+const CLOSE_FALLBACK_DELAY: Duration = Duration::from_secs(1);
+
 /// Run the post command and wait for it to finish.
 ///
 /// Waiting matters: `systemctl reboot`/`poweroff` authorise with logind/polkit
@@ -553,43 +559,60 @@ fn blend_text(
     y
 }
 
-#[derive(Default)]
+const USAGE: &str = "Usage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]";
+
+#[derive(Debug, Default, PartialEq, Eq)]
 struct CliOptions {
     dry_run: bool,
     post_command: Option<String>,
     config_path: Option<PathBuf>,
 }
-fn cli_options() -> CliOptions {
+
+/// The result of parsing arguments. `Help` is not an error: it's a request to
+/// print usage and exit successfully.
+#[derive(Debug, PartialEq, Eq)]
+enum CliOutcome {
+    Options(CliOptions),
+    Help,
+}
+
+/// Parse arguments (excluding the program name).
+///
+/// Returning a result instead of printing and exiting keeps this testable; the
+/// thin `cli_options` wrapper below handles the exit.
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOutcome, String> {
     let mut options = CliOptions::default();
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dry-run" => options.dry_run = true,
             "--post-cmd" => {
-                options.post_command = args.next().or_else(|| {
-                    eprintln!("--post-cmd requires a command");
-                    process::exit(2)
-                })
+                options.post_command = Some(args.next().ok_or("--post-cmd requires a command")?);
             }
             "--config" => {
-                options.config_path = args.next().map(PathBuf::from).or_else(|| {
-                    eprintln!("--config requires a path");
-                    process::exit(2)
-                })
+                options.config_path = Some(PathBuf::from(
+                    args.next().ok_or("--config requires a path")?,
+                ));
             }
-            "--help" | "-h" => {
-                println!("Usage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]");
-                process::exit(0);
-            }
-            unknown => {
-                eprintln!(
-                    "unknown option: {unknown}\nUsage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]"
-                );
-                process::exit(2);
-            }
+            "--help" | "-h" => return Ok(CliOutcome::Help),
+            unknown => return Err(format!("unknown option: {unknown}")),
         }
     }
-    options
+    Ok(CliOutcome::Options(options))
+}
+
+fn cli_options() -> CliOptions {
+    match parse_args(env::args().skip(1)) {
+        Ok(CliOutcome::Options(options)) => options,
+        Ok(CliOutcome::Help) => {
+            println!("{USAGE}");
+            process::exit(0);
+        }
+        Err(message) => {
+            eprintln!("{message}\n{USAGE}");
+            process::exit(2);
+        }
+    }
 }
 
 struct Ui {
@@ -605,6 +628,9 @@ struct Ui {
     /// Set once the overlay has been presented and the close sequence has been
     /// kicked off; keeps `frame` and `tick` from starting it twice.
     close_started: bool,
+    /// When the surface was first configured, used to bound how long we wait
+    /// for the frame callback before falling back to closing anyway.
+    configured_at: Option<Instant>,
     image: Option<DynamicImage>,
     apps: Vec<(String, String)>,
     count: usize,
@@ -791,6 +817,14 @@ impl Ui {
             return;
         }
         self.last_poll = Instant::now();
+        // Backstop for `frame`: if the compositor has configured the overlay but
+        // never delivered a frame callback, don't leave the user stuck on it.
+        if !self.close_started
+            && let Some(configured_at) = self.configured_at
+            && configured_at.elapsed() >= CLOSE_FALLBACK_DELAY
+        {
+            self.start_closing();
+        }
         let mut state = self.shared.lock().unwrap();
         refresh_clients(&mut state);
         // Nothing is closed until the first frame callback fires, so don't treat
@@ -879,21 +913,27 @@ impl LayerShellHandler for Ui {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
-            self.width = configure.new_size.0;
-            self.height = configure.new_size.1;
-        } else if let Some((width, height)) = self.output_size() {
-            self.width = width;
-            self.height = height;
-        }
+        let (width, height) = if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
+            (configure.new_size.0, configure.new_size.1)
+        } else {
+            self.output_size().unwrap_or((self.width, self.height))
+        };
+        let size_changed = width != self.width || height != self.height;
+        self.width = width;
+        self.height = height;
         if self.first_configure {
             self.first_configure = false;
+            self.configured_at = Some(Instant::now());
             // Request the frame callback *before* committing the first buffer:
             // it fires once the compositor has the overlay on screen, which is
             // when `frame` starts closing apps. Waiting avoids closing them
             // before the user ever sees the overlay.
             let surface = layer.wl_surface();
             surface.frame(qh, surface.clone());
+            self.draw();
+        } else if size_changed {
+            // A later configure (monitor hotplug, resolution change) resizes the
+            // surface; redraw or the overlay keeps a buffer at the old size.
             self.draw();
         }
     }
@@ -1110,6 +1150,7 @@ fn main() {
         height: 1,
         first_configure: true,
         close_started: false,
+        configured_at: None,
         image,
         apps,
         count,
@@ -1287,5 +1328,64 @@ mod tests {
                 b: 0x18
             }
         );
+    }
+
+    #[test]
+    fn parses_cli_flags() {
+        let args = [
+            "--dry-run",
+            "--post-cmd",
+            "systemctl reboot",
+            "--config",
+            "/tmp/hyprdie.toml",
+        ]
+        .map(String::from);
+        let Ok(CliOutcome::Options(options)) = parse_args(args) else {
+            panic!("expected parsed options");
+        };
+        assert!(options.dry_run);
+        assert_eq!(options.post_command.as_deref(), Some("systemctl reboot"));
+        assert_eq!(
+            options.config_path.as_deref(),
+            Some(Path::new("/tmp/hyprdie.toml"))
+        );
+    }
+
+    #[test]
+    fn empty_cli_is_all_defaults() {
+        let Ok(CliOutcome::Options(options)) = parse_args(std::iter::empty::<String>()) else {
+            panic!("expected parsed options");
+        };
+        assert_eq!(options, CliOptions::default());
+    }
+
+    #[test]
+    fn help_is_not_an_error() {
+        assert_eq!(parse_args([String::from("--help")]), Ok(CliOutcome::Help));
+        assert_eq!(parse_args([String::from("-h")]), Ok(CliOutcome::Help));
+    }
+
+    #[test]
+    fn options_missing_a_value_are_errors() {
+        assert!(parse_args([String::from("--post-cmd")]).is_err());
+        assert!(parse_args([String::from("--config")]).is_err());
+    }
+
+    #[test]
+    fn unknown_option_is_an_error() {
+        assert!(parse_args([String::from("--nope")]).is_err());
+    }
+
+    #[test]
+    fn text_measurement_grows_with_length() {
+        // Skip where no candidate font is installed rather than fail a machine
+        // that has none: this checks arithmetic, not font availability.
+        let Some(font) = load_font() else {
+            return;
+        };
+        assert_eq!(measure_text(&font, "", 20.0), 0.0);
+        let short = measure_text(&font, "a", 20.0);
+        let long = measure_text(&font, "aaaa", 20.0);
+        assert!(long > short, "{long} should exceed {short}");
     }
 }
