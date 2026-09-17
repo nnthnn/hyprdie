@@ -241,6 +241,28 @@ fn cgroup_path(pid: i32) -> Option<String> {
     parse_cgroup(&fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
 }
 
+/// Read a process's parent PID from `/proc/<pid>/stat`.
+fn ppid_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Format: "pid (comm) state ppid ...". `comm` may contain spaces and parens,
+    // so skip to the last ')' and take the second field after it.
+    let close = stat.rfind(')')?;
+    stat[close + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+/// PIDs on the parent chain above `pid`, up to but excluding PID 1.
+fn ancestors(pid: i32) -> HashSet<i32> {
+    let mut ancestors = HashSet::new();
+    let mut current = pid;
+    while let Some(parent) = ppid_of(current) {
+        if parent <= 1 || !ancestors.insert(parent) {
+            break;
+        }
+        current = parent;
+    }
+    ancestors
+}
+
 /// Find the processes to tear down along with the session.
 ///
 /// Prefer enumerating the systemd session cgroup: unlike a ppid walk it still
@@ -267,6 +289,14 @@ fn session_descendants(root: i32) -> HashSet<i32> {
             }
         }
         if !found.is_empty() {
+            // The session cgroup also contains Hyprland's own ancestors: the
+            // display manager's session leader (e.g. `sddm-helper`) and the
+            // launcher (e.g. `start-hyprland`). Killing them ends the session
+            // and drops our Wayland connection before the post command can run,
+            // so never target anything above Hyprland.
+            for ancestor in ancestors(root) {
+                found.remove(&ancestor);
+            }
             return found;
         }
     }
@@ -275,6 +305,10 @@ fn session_descendants(root: i32) -> HashSet<i32> {
 
 fn ppid_descendants(root: i32) -> HashSet<i32> {
     let mut found = HashSet::new();
+    // Track visited pids separately from `found`: ignored daemons (Xwayland)
+    // must not be killed, but we still have to walk *through* them to reach
+    // their children, which are the X11 clients we do want to close.
+    let mut visited = HashSet::new();
     let mut pending = vec![root];
     while let Some(parent) = pending.pop() {
         let Ok(entries) = fs::read_dir("/proc") else {
@@ -295,12 +329,13 @@ fn ppid_descendants(root: i32) -> HashSet<i32> {
             if fields.get(1).and_then(|v| v.parse().ok()) != Some(parent) {
                 continue;
             }
-            if IGNORE_DAEMONS.contains(&comm) {
+            if !visited.insert(pid) {
                 continue;
             }
-            if found.insert(pid) {
-                pending.push(pid);
+            if !IGNORE_DAEMONS.contains(&comm) {
+                found.insert(pid);
             }
+            pending.push(pid);
         }
     }
     found
@@ -387,10 +422,55 @@ fn retry_close(state: &mut ShutdownState) {
         }
     }
 }
+
+/// Whether a process is still running. A zombie still has a `/proc/<pid>`
+/// entry, so existence alone isn't enough: a process that has exited but not
+/// been reaped must count as dead, or the shutdown loop waits on a corpse.
+fn is_alive(pid: i32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // Format: "pid (comm) state ...". `comm` may contain spaces and parens, so
+    // find the last ')' and read the state that follows it.
+    let Some(close) = stat.rfind(')') else {
+        return true;
+    };
+    !matches!(
+        stat[close + 1..].split_whitespace().next(),
+        Some("Z") | Some("X")
+    )
+}
+
 fn alive(pids: &HashSet<i32>) -> usize {
-    pids.iter()
-        .filter(|p| Path::new(&format!("/proc/{p}")).exists())
-        .count()
+    pids.iter().filter(|p| is_alive(**p)).count()
+}
+
+/// How long to let the post command run before giving up on it.
+const POST_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run the post command and wait for it to finish.
+///
+/// Waiting matters: `systemctl reboot`/`poweroff` authorise with logind/polkit
+/// while the session is still alive, so firing it off and immediately exiting
+/// Hyprland lets session teardown kill it mid-authorisation. The wait is bounded
+/// so a command that hangs can't wedge logout forever.
+fn run_post_command(command: &str) {
+    let Ok(mut child) = Command::new("sh").args(["-c", command]).spawn() else {
+        return;
+    };
+    let deadline = Instant::now() + POST_COMMAND_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                return;
+            }
+        }
+    }
 }
 
 fn load_font() -> Option<FontVec> {
@@ -667,20 +747,23 @@ impl Ui {
             return;
         }
         if force {
+            // Forcing only changes *how* the apps close: skip the graceful
+            // closewindow/SIGTERM/retry sequence and SIGKILL everything now.
             for pid in &state.pids {
                 let _ = kill(Pid::from_raw(*pid), Signal::SIGKILL);
             }
-        } else {
-            // Run the post command *before* exiting Hyprland: commands like
-            // `systemctl reboot` need the session to still be active when they
-            // ask logind/polkit for authorization, and teardown races it if we
-            // exit first.
-            if let Some(command) = &state.config.commands.post {
-                let _ = Command::new("sh").args(["-c", command]).spawn();
-            }
-            if !state.config.behavior.no_exit {
-                let _ = hyprctl(&["dispatch", "exit"]);
-            }
+        }
+        // The tail is the same whether apps closed on their own, were escalated
+        // to SIGKILL by the timeout, or the user forced it. Run the post command
+        // *before* exiting Hyprland: commands like `systemctl reboot` need the
+        // session to still be active when they ask logind/polkit for
+        // authorization, and teardown races them if we exit first.
+        // `run_post_command` waits for it to finish.
+        if let Some(command) = &state.config.commands.post {
+            run_post_command(command);
+        }
+        if !state.config.behavior.no_exit {
+            let _ = hyprctl(&["dispatch", "exit"]);
         }
         self.stop.stop();
     }
@@ -813,6 +896,14 @@ impl SeatHandler for Ui {
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
+/// Whether a keysym is the force-quit key. The keysym arrives after the current
+/// modifiers are applied, so a bare F key is `Keysym::f` (0x66) while `Keysym::F`
+/// (0x46) is Shift+f — and Caps Lock flips it too. Accept both so the advertised
+/// `F` works regardless.
+fn is_force_key(keysym: Keysym) -> bool {
+    matches!(keysym, Keysym::f | Keysym::F)
+}
+
 impl KeyboardHandler for Ui {
     fn enter(
         &mut self,
@@ -844,7 +935,7 @@ impl KeyboardHandler for Ui {
     ) {
         if event.keysym == Keysym::Escape {
             self.stop.stop();
-        } else if event.keysym == Keysym::F {
+        } else if is_force_key(event.keysym) {
             self.finish(true);
         }
     }
@@ -903,11 +994,22 @@ fn main() {
         let _ = signal(Signal::SIGHUP, SigHandler::SigIgn);
     }
     let options = cli_options();
+    let explicit_config = options.config_path.is_some();
     let config_file = options.config_path.clone().unwrap_or_else(config_path);
-    let mut config = load_config(&config_file).unwrap_or_else(|e| {
-        eprintln!("warning: {e}; using defaults");
-        Config::default()
-    });
+    let mut config = match load_config(&config_file) {
+        Ok(config) => config,
+        // An explicitly requested config that can't be read is an error: silently
+        // falling back to defaults would run with settings the user didn't ask
+        // for. The default location is different — it's often absent, so warn.
+        Err(e) if explicit_config => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("warning: {e}; using defaults");
+            Config::default()
+        }
+    };
     if options.dry_run {
         config.behavior.dry_run = true;
     }
@@ -1058,6 +1160,69 @@ mod tests {
     fn rejects_invalid_color() {
         assert!(toml::from_str::<UiColors>("title = \"#12\"").is_err());
         assert!(toml::from_str::<UiColors>("title = \"#zzzzzz\"").is_err());
+    }
+
+    #[test]
+    fn force_key_accepts_plain_and_shifted_f() {
+        assert!(is_force_key(Keysym::f));
+        assert!(is_force_key(Keysym::F));
+        assert!(!is_force_key(Keysym::Escape));
+        assert!(!is_force_key(Keysym::g));
+    }
+
+    #[test]
+    fn ppid_of_missing_process_is_none() {
+        assert_eq!(ppid_of(i32::MAX), None);
+    }
+
+    #[test]
+    fn session_descendants_never_target_ancestors() {
+        let me = process::id() as i32;
+        // Whether discovery goes through the cgroup or the ppid walk, our own
+        // parent — an ancestor like the DM's session helper — must never end up
+        // in the kill set.
+        if let Some(parent) = ppid_of(me) {
+            assert!(!session_descendants(me).contains(&parent));
+        }
+    }
+
+    #[test]
+    fn ancestors_walk_up_without_self_or_init() {
+        let me = process::id() as i32;
+        let ancestors = ancestors(me);
+        assert!(ancestors.contains(&ppid_of(me).unwrap()));
+        assert!(!ancestors.contains(&me));
+        assert!(!ancestors.contains(&1));
+    }
+
+    #[test]
+    fn running_process_is_alive() {
+        assert!(is_alive(process::id() as i32));
+    }
+
+    #[test]
+    fn missing_process_is_not_alive() {
+        assert!(!is_alive(i32::MAX));
+    }
+
+    #[test]
+    fn zombie_is_not_alive() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        // `true` exits at once; without reaping it, it stays a zombie.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
+                && let Some(close) = stat.rfind(')')
+                && stat[close + 1..].trim_start().starts_with('Z')
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child never became a zombie");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!is_alive(pid));
+        let _ = child.wait();
     }
 
     #[test]
