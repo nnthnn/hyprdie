@@ -30,7 +30,7 @@ use smithay_client_toolkit::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -559,7 +559,158 @@ fn blend_text(
     y
 }
 
-const USAGE: &str = "Usage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]";
+/// A single ANSI style: an optional 24-bit colour and a bold flag. `paint` is a
+/// no-op when colour is disabled, so callers can build a line unconditionally
+/// and let the terminal decide.
+#[derive(Clone, Copy)]
+struct Style {
+    rgb: Option<(u8, u8, u8)>,
+    bold: bool,
+}
+
+impl Style {
+    const fn fg(r: u8, g: u8, b: u8) -> Self {
+        Self {
+            rgb: Some((r, g, b)),
+            bold: false,
+        }
+    }
+
+    fn paint(self, text: &str, color: bool) -> String {
+        if !color {
+            return text.to_owned();
+        }
+        let mut out = String::new();
+        if self.bold {
+            out.push_str("\x1b[1m");
+        }
+        if let Some((r, g, b)) = self.rgb {
+            out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+        }
+        out.push_str(text);
+        out.push_str("\x1b[0m");
+        out
+    }
+}
+
+// Muted palette, echoing the overlay's default `[ui.colors]` so the console and
+// the shutdown screen read as the same tool. Deliberately not bright.
+const HEADING: Style = Style {
+    rgb: Some((0xd8, 0xde, 0xe9)),
+    bold: true,
+};
+const ACCENT: Style = Style::fg(0xac, 0xb5, 0xc7);
+const MUTED: Style = Style::fg(0x80, 0x80, 0x80);
+const ERROR: Style = Style {
+    rgb: Some((0xb8, 0x66, 0x66)),
+    bold: true,
+};
+const WARNING: Style = Style::fg(0xb0, 0x9a, 0x6a);
+
+const USAGE: &str = "hyprdie [OPTIONS]";
+
+/// Whether to emit ANSI colour for a stream. Colour is for a human at a
+/// terminal only: pipes and log files get plain text, and `NO_COLOR` opts out
+/// even on a TTY.
+fn color_enabled(is_terminal: bool) -> bool {
+    is_terminal && !no_color()
+}
+
+fn no_color() -> bool {
+    env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+fn stderr_color() -> bool {
+    color_enabled(std::io::stderr().is_terminal())
+}
+
+/// "hyprdie" shaded from grey to slate. The gradient is the one flourish,
+/// mirroring hypr-recall's bin name in this project's quieter palette.
+fn wordmark(color: bool) -> String {
+    const TEXT: &str = "hyprdie";
+    const FROM: (f32, f32, f32) = (0x6b as f32, 0x72 as f32, 0x80 as f32);
+    const TO: (f32, f32, f32) = (0xac as f32, 0xb5 as f32, 0xc7 as f32);
+    if !color {
+        return TEXT.to_owned();
+    }
+    let steps = (TEXT.len() - 1).max(1) as f32;
+    let mut out = String::from("\x1b[1m");
+    for (index, ch) in TEXT.chars().enumerate() {
+        let frac = index as f32 / steps;
+        let r = (FROM.0 + (TO.0 - FROM.0) * frac) as u8;
+        let g = (FROM.1 + (TO.1 - FROM.1) * frac) as u8;
+        let b = (FROM.2 + (TO.2 - FROM.2) * frac) as u8;
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{ch}"));
+    }
+    out.push_str("\x1b[0m");
+    out
+}
+
+fn print_help() {
+    let color = color_enabled(std::io::stdout().is_terminal());
+    println!(
+        "{} — a graceful shutdown screen for Hyprland",
+        wordmark(color)
+    );
+    println!();
+    println!(
+        "{} {}",
+        HEADING.paint("Usage:", color),
+        ACCENT.paint(USAGE, color)
+    );
+    println!();
+    println!("{}", HEADING.paint("Options:", color));
+    option_row(
+        color,
+        "    --dry-run",
+        None,
+        "Show the overlay and close nothing",
+    );
+    option_row(
+        color,
+        "    --post-cmd",
+        Some("<CMD>"),
+        "Run CMD before exiting Hyprland",
+    );
+    option_row(
+        color,
+        "    --config",
+        Some("<PATH>"),
+        "Read configuration from PATH",
+    );
+    option_row(color, "-h, --help", None, "Print this help");
+}
+
+/// One `Options:` row. The flags and value are painted separately so the value
+/// reads as a placeholder, but the padding is measured from the plain text so
+/// ANSI escapes don't throw the description column off.
+fn option_row(color: bool, flags: &str, value: Option<&str>, description: &str) {
+    const DESCRIPTION_COLUMN: usize = 30;
+    let mut plain = format!("  {flags}");
+    if let Some(value) = value {
+        plain.push(' ');
+        plain.push_str(value);
+    }
+    let padding = " ".repeat(DESCRIPTION_COLUMN.saturating_sub(plain.len()));
+    let mut rendered = ACCENT.paint(&format!("  {flags}"), color);
+    if let Some(value) = value {
+        rendered.push(' ');
+        rendered.push_str(&MUTED.paint(value, color));
+    }
+    println!("{rendered}{padding}{description}");
+}
+
+/// Print a parse error in the same style as `--help`, followed by the usage
+/// line.
+fn print_error(message: &str) {
+    let color = stderr_color();
+    eprintln!("{} {message}", ERROR.paint("error:", color));
+    eprintln!(
+        "{} {}",
+        HEADING.paint("Usage:", color),
+        ACCENT.paint(USAGE, color)
+    );
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CliOptions {
@@ -576,26 +727,47 @@ enum CliOutcome {
     Help,
 }
 
+/// A command-line parse failure. A typed error rather than a `String` keeps the
+/// messages testable and lets the caller choose how to render them.
+#[derive(Debug, PartialEq, Eq)]
+enum CliError {
+    UnknownOption(String),
+    MissingValue(&'static str),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::UnknownOption(option) => write!(f, "unknown option: {option}"),
+            CliError::MissingValue(message) => write!(f, "{message}"),
+        }
+    }
+}
+
 /// Parse arguments (excluding the program name).
 ///
 /// Returning a result instead of printing and exiting keeps this testable; the
 /// thin `cli_options` wrapper below handles the exit.
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOutcome, String> {
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOutcome, CliError> {
     let mut options = CliOptions::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dry-run" => options.dry_run = true,
             "--post-cmd" => {
-                options.post_command = Some(args.next().ok_or("--post-cmd requires a command")?);
+                options.post_command = Some(
+                    args.next()
+                        .ok_or(CliError::MissingValue("--post-cmd requires a command"))?,
+                );
             }
             "--config" => {
                 options.config_path = Some(PathBuf::from(
-                    args.next().ok_or("--config requires a path")?,
+                    args.next()
+                        .ok_or(CliError::MissingValue("--config requires a path"))?,
                 ));
             }
             "--help" | "-h" => return Ok(CliOutcome::Help),
-            unknown => return Err(format!("unknown option: {unknown}")),
+            unknown => return Err(CliError::UnknownOption(unknown.to_owned())),
         }
     }
     Ok(CliOutcome::Options(options))
@@ -605,11 +777,11 @@ fn cli_options() -> CliOptions {
     match parse_args(env::args().skip(1)) {
         Ok(CliOutcome::Options(options)) => options,
         Ok(CliOutcome::Help) => {
-            println!("{USAGE}");
+            print_help();
             process::exit(0);
         }
-        Err(message) => {
-            eprintln!("{message}\n{USAGE}");
+        Err(error) => {
+            print_error(&error.to_string());
             process::exit(2);
         }
     }
@@ -1048,9 +1220,17 @@ delegate_layer!(Ui);
 delegate_registry!(Ui);
 
 fn main() {
+    // Parse before the Hyprland guard so `--help` and argument errors work
+    // anywhere, not only inside a session.
+    let options = cli_options();
+
     // Check that we're actually running under Hyprland
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_err() {
-        eprintln!("Error: HYPRLAND_INSTANCE_SIGNATURE not found. Are you running under Hyprland?");
+        let color = stderr_color();
+        eprintln!(
+            "{} HYPRLAND_INSTANCE_SIGNATURE not found. Are you running under Hyprland?",
+            ERROR.paint("error:", color)
+        );
         eprintln!("hyprdie must be run from within a Hyprland session.");
         process::exit(1);
     }
@@ -1061,7 +1241,6 @@ fn main() {
     unsafe {
         let _ = signal(Signal::SIGHUP, SigHandler::SigIgn);
     }
-    let options = cli_options();
     let explicit_config = options.config_path.is_some();
     let config_file = options.config_path.clone().unwrap_or_else(config_path);
     let mut config = match load_config(&config_file) {
@@ -1069,12 +1248,17 @@ fn main() {
         // An explicitly requested config that can't be read is an error: silently
         // falling back to defaults would run with settings the user didn't ask
         // for. The default location is different — it's often absent, so warn.
-        Err(e) if explicit_config => {
-            eprintln!("error: {e}");
+        Err(error) if explicit_config => {
+            let color = stderr_color();
+            eprintln!("{} {error}", ERROR.paint("error:", color));
             process::exit(1);
         }
-        Err(e) => {
-            eprintln!("warning: {e}; using defaults");
+        Err(error) => {
+            let color = stderr_color();
+            eprintln!(
+                "{} {error}; using defaults",
+                WARNING.paint("warning:", color)
+            );
             Config::default()
         }
     };
@@ -1367,13 +1551,52 @@ mod tests {
 
     #[test]
     fn options_missing_a_value_are_errors() {
-        assert!(parse_args([String::from("--post-cmd")]).is_err());
-        assert!(parse_args([String::from("--config")]).is_err());
+        assert_eq!(
+            parse_args([String::from("--post-cmd")]),
+            Err(CliError::MissingValue("--post-cmd requires a command"))
+        );
+        assert_eq!(
+            parse_args([String::from("--config")]),
+            Err(CliError::MissingValue("--config requires a path"))
+        );
     }
 
     #[test]
     fn unknown_option_is_an_error() {
-        assert!(parse_args([String::from("--nope")]).is_err());
+        assert_eq!(
+            parse_args([String::from("--nope")]),
+            Err(CliError::UnknownOption("--nope".to_owned()))
+        );
+    }
+
+    #[test]
+    fn paint_is_plain_without_colour() {
+        assert_eq!(ACCENT.paint("--dry-run", false), "--dry-run");
+        assert_eq!(ERROR.paint("error:", false), "error:");
+    }
+
+    #[test]
+    fn paint_wraps_text_in_ansi_when_enabled() {
+        let painted = ACCENT.paint("--dry-run", true);
+        assert!(painted.contains("--dry-run"));
+        assert!(painted.starts_with("\x1b["));
+        assert!(painted.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn wordmark_is_plain_without_colour() {
+        assert_eq!(wordmark(false), "hyprdie");
+    }
+
+    #[test]
+    fn wordmark_colours_each_letter_independently() {
+        let painted = wordmark(true);
+        for ch in "hyprdie".chars() {
+            assert!(painted.contains(ch), "missing {ch}");
+        }
+        // One truecolour sequence per character, plus the leading bold and the
+        // trailing reset.
+        assert_eq!(painted.matches("\x1b[38;2;").count(), 7);
     }
 
     #[test]
