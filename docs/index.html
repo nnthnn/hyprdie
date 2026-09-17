@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<!--
+  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠀⠀⠀⣠⣔⡿⠛⠒⠒⡕⢄⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠀⣀⣴⣳⠃⠀⠀⠀⠀⠘⢎⡦⣄⠀⠀⠀⠀
+  ⠀⠀⠀⣜⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⠢⣳⠀⠀⠀
+  ⠀⠀⢸⣸⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⡆⠀⠀
+  ⠀⠀⠘⡏⢀⢴⠶⣤⢄⢲⣲⠦⣦⣤⡤⡀⡇⠇⠀⠀
+  ⠀⠀⠀⣧⠀⣾⢀⣸⡸⠘⢸⠀⣿⠀⣸⡏⣧⠀⠀⠀
+  ⠀⠀⠀⢹⠀⣿⠿⡯⡀⢀⣼⢀⣿⠛⠉⠀⢻⠀⠀⠀
+  ⠀⠀⠀⣿⠐⠛⠂⠘⠛⠒⠛⠊⠛⠂⠀⢸⢸⠀⠀⠀
+  ⠀⠀⠀⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡼⠀⠀⠀
+  ⠀⠀⠀⢻⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡆⠀⠀⠀
+  ⠀⠀⢀⢾⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡷⡀⠀⠀
+  ⠀⣠⠃⠘⠊⠉⠛⠛⠋⠩⠩⠭⠍⠛⠛⠛⠃⠐⡄⠀
+  ⠀⣯⡉⠉⢉⡉⠉⠉⠉⠉⠉⠉⣉⣉⣉⣉⣉⣉⣹⠀
+
+  You found the source. The overlay is drawn through wl_shm by hand —
+  no toolkit, no GTK — so this tombstone is about as decorative as it gets.
+
+  github.com/nnthnn/hyprdie
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>hyprdie — a graceful shutdown screen for Hyprland</title>
+  <meta name="description" content="hyprdie puts a fullscreen overlay over everything still running in your Hyprland session, asks each app to close, escalates when one refuses, then exits. No more reboots eating unsaved work.">
+  <meta name="keywords" content="hyprland, wayland, shutdown, logout, session, sigterm, sigkill, linux, tiling">
+  <meta name="theme-color" content="#0a0908">
+
+  <!-- Open Graph -->
+  <meta property="og:type"        content="website">
+  <meta property="og:url"         content="https://nnthnn.github.io/hyprdie/">
+  <meta property="og:title"       content="hyprdie — a graceful shutdown screen for Hyprland">
+  <meta property="og:description" content="Close everything, escalate when an app refuses, then exit. A graceful shutdown screen for Hyprland.">
+  <meta property="og:image"       content="https://nnthnn.github.io/hyprdie/assets/icon-256.png">
+
+  <!-- Twitter -->
+  <meta name="twitter:card"        content="summary">
+  <meta name="twitter:title"       content="hyprdie">
+  <meta name="twitter:description" content="A graceful shutdown screen for Hyprland.">
+  <meta name="twitter:image"       content="https://nnthnn.github.io/hyprdie/assets/icon-256.png">
+
+  <!-- Canonical -->
+  <link rel="canonical" href="https://nnthnn.github.io/hyprdie/">
+
+  <!-- Favicon -->
+  <link rel="icon"             href="assets/icon-32.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/icon-256.png">
+
+  <!-- Structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "hyprdie",
+    "description": "A graceful shutdown screen for Hyprland: close every running app, escalate when one refuses, then exit the session.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Linux",
+    "license": "https://opensource.org/licenses/MIT",
+    "url": "https://github.com/nnthnn/hyprdie"
+  }
+  </script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Self-hosted fonts ── */
+
+    /* Permanent Marker — spraycan display face */
+    @font-face {
+      font-family: 'Permanent Marker';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url(assets/permanentmarker.woff2) format('woff2');
+    }
+
+    /* JetBrains Mono — variable file serves 400/600/700 for body + code */
+    @font-face {
+      font-family: 'JetBrains Mono';
+      font-style: normal;
+      font-weight: 400 700;
+      font-display: swap;
+      src: url(assets/jetbrainsmono.woff2) format('woff2');
+    }
+
+    :root {
+      --wall:      #0a0908;
+      --wall-2:    #11100e;
+      --panel:     #141210;
+      --panel-2:   #0d0c0b;
+      --line:      #2b2723;
+      --ink:       #f2eee6;
+      --ink-dim:   #b0aba1;
+      --ash:       #8a857b;
+      --blood:     #b3141f;
+      --blood-hot: #e5383b;
+      --stone:     #acb5c7;
+      --mono: 'JetBrains Mono', ui-monospace, 'Courier New', monospace;
+      --mark: 'Permanent Marker', var(--mono);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--wall);
+      color: var(--ink-dim);
+      font-family: var(--mono);
+      font-size: 1rem;
+      line-height: 1.7;
+      min-height: 100vh;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Grit: wall wash, concrete grain, vignette, scanlines ── */
+
+    .bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background:
+        radial-gradient(130% 90% at 50% -20%, #211d18 0%, #100e0c 42%, #060505 100%),
+        linear-gradient(180deg, #0b0a09, #060505);
+    }
+
+    .grain {
+      position: fixed;
+      inset: -50%;
+      z-index: 1;
+      pointer-events: none;
+      opacity: 0.5;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 240px 240px;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      background: radial-gradient(120% 78% at 50% 6%, transparent 34%, rgba(0, 0, 0, 0.82) 100%);
+    }
+
+    .scan {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      pointer-events: none;
+      opacity: 0.42;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent 0 2px,
+        rgba(0, 0, 0, 0.18) 2px 4px
+      );
+    }
+
+    .container {
+      position: relative;
+      z-index: 10;
+      max-width: 1060px;
+      margin: 0 auto;
+      padding: 76px 30px 72px;
+    }
+
+    /* ── Shared bits ── */
+
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.22em;
+      color: var(--blood-hot);
+    }
+
+    .kicker::before {
+      content: '';
+      width: 30px;
+      height: 3px;
+      background: currentColor;
+      transform: skewX(-32deg);
+    }
+
+    p code, li code {
+      font-family: var(--mono);
+      font-size: 0.9em;
+      color: #f0b9b3;
+      background: rgba(179, 20, 31, 0.13);
+      border: 1px solid rgba(229, 56, 59, 0.24);
+      border-radius: 3px;
+      padding: 1px 5px;
+    }
+
+    /* ── Spray drips under headings ── */
+
+    .drips {
+      display: block;
+      width: 100%;
+      height: 46px;
+      margin-top: 10px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='480' height='70' viewBox='0 0 480 70'%3E%3Cg fill='%23b3141f'%3E%3Crect x='0' y='0' width='480' height='5' rx='2.5'/%3E%3Crect x='34' y='0' width='5' height='30' rx='2.5'/%3E%3Ccircle cx='36.5' cy='36' r='6'/%3E%3Crect x='92' y='0' width='4' height='16' rx='2'/%3E%3Ccircle cx='94' cy='21' r='4.5'/%3E%3Crect x='150' y='0' width='6' height='44' rx='3'/%3E%3Ccircle cx='153' cy='52' r='7'/%3E%3Crect x='236' y='0' width='4' height='24' rx='2'/%3E%3Ccircle cx='238' cy='29' r='5'/%3E%3Crect x='300' y='0' width='5' height='12' rx='2.5'/%3E%3Crect x='352' y='0' width='4' height='38' rx='2'/%3E%3Ccircle cx='354' cy='43' r='5.5'/%3E%3Crect x='420' y='0' width='5' height='20' rx='2.5'/%3E%3Ccircle cx='422.5' cy='25' r='5'/%3E%3C/g%3E%3C/svg%3E");
+      background-repeat: repeat-x;
+      background-size: 300px 44px;
+      opacity: 0.85;
+    }
+
+    h2.section-title {
+      font-family: var(--mark);
+      font-weight: 400;
+      font-size: clamp(1.7rem, 4.4vw, 2.5rem);
+      line-height: 1.15;
+      color: var(--ink);
+      letter-spacing: 0.01em;
+      transform: rotate(-1deg);
+      transform-origin: left center;
+      text-shadow: 0 2px 0 #000, 0 0 26px rgba(229, 56, 59, 0.12);
+      margin-top: 8px;
+    }
+
+    section {
+      margin-bottom: 92px;
+      scroll-margin-top: 24px;
+    }
+
+    /* ── Hero ── */
+
+    .hero { text-align: center; margin-bottom: 64px; }
+
+    .hero-mark {
+      display: block;
+      width: min(560px, 84vw);
+      height: auto;
+      margin: 0 auto 8px;
+      filter:
+        drop-shadow(0 14px 34px rgba(0, 0, 0, 0.9))
+        drop-shadow(0 0 46px rgba(179, 20, 31, 0.16));
+      animation: flicker 6.5s steps(1, end) infinite;
+    }
+
+    /* A dying fluorescent sign — mostly steady, occasionally it stutters. */
+    @keyframes flicker {
+      0%, 92%, 100% { opacity: 1; }
+      93%           { opacity: 0.72; }
+      93.6%         { opacity: 1; }
+      94.2%         { opacity: 0.55; }
+      94.8%         { opacity: 1; }
+    }
+
+    .tagline {
+      font-family: var(--mark);
+      font-weight: 400;
+      font-size: clamp(1.35rem, 4.2vw, 2.05rem);
+      line-height: 1.35;
+      color: var(--ink);
+      letter-spacing: 0.01em;
+      max-width: 760px;
+      margin: 18px auto 20px;
+      text-shadow: 0 2px 0 #000;
+    }
+
+    .tagline em {
+      font-style: normal;
+      color: var(--blood-hot);
+      text-shadow: 0 0 22px rgba(229, 56, 59, 0.45);
+    }
+
+    .sub {
+      max-width: 620px;
+      margin: 0 auto 40px;
+      color: var(--ink-dim);
+      font-size: 0.98rem;
+    }
+
+    .sub strong { color: var(--ink); font-weight: 700; }
+
+    /* ── Buttons — torn spray-tag shapes ── */
+
+    .cta {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 13px 30px;
+      font-family: var(--mono);
+      font-size: 0.88rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-decoration: none;
+      color: var(--ink);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      clip-path: polygon(2% 4%, 97% 0, 100% 88%, 98% 100%, 4% 96%, 0 14%);
+      transition: transform 0.18s, background 0.18s, border-color 0.18s, color 0.18s;
+    }
+
+    .btn:hover { transform: translateY(-2px) rotate(-0.6deg); }
+
+    .btn-primary {
+      background: linear-gradient(150deg, var(--blood-hot), var(--blood));
+      border-color: transparent;
+      color: #fff;
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(150deg, #f04b4e, #c41722);
+      box-shadow: 0 0 30px rgba(229, 56, 59, 0.35);
+    }
+
+    .btn-secondary { color: var(--ink-dim); }
+    .btn-secondary:hover { color: var(--ink); border-color: var(--ash); }
+
+    /* ── Overlay mock ── */
+
+    .screen {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      border: 1px solid #332e29;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #1b1818 url(assets/background.webp) center / cover no-repeat;
+      box-shadow:
+        0 30px 70px rgba(0, 0, 0, 0.72),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    .screen::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0, 0, 0, 0.16) 2px 4px);
+      pointer-events: none;
+    }
+
+    .screen-inner {
+      position: relative;
+      z-index: 1;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2.2%;
+      padding: 5% 6%;
+      text-align: center;
+    }
+
+    .screen-title {
+      font-family: var(--mono);
+      font-weight: 700;
+      color: #ffffff;
+      font-size: clamp(1rem, 3.4vw, 2.1rem);
+      letter-spacing: 0.02em;
+    }
+
+    .screen-apps {
+      list-style: none;
+      color: var(--stone);
+      font-size: clamp(0.62rem, 1.75vw, 1rem);
+      line-height: 1.9;
+    }
+
+    .screen-apps span { color: #7f879a; }
+
+    .screen-count {
+      color: var(--ash);
+      font-size: clamp(0.6rem, 1.6vw, 0.9rem);
+      letter-spacing: 0.06em;
+    }
+
+    .screen-hint {
+      color: #808080;
+      font-size: clamp(0.58rem, 1.6vw, 0.86rem);
+      letter-spacing: 0.05em;
+    }
+
+    .screen-hint b { color: #ffffff; font-weight: 700; }
+
+    .screen-caption {
+      text-align: center;
+      color: var(--ash);
+      font-size: 0.78rem;
+      margin-top: 16px;
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Terminal ── */
+
+    .terminal {
+      background: #0c0b0a;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 20px 24px 22px;
+      text-align: left;
+      overflow-x: auto;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+    }
+
+    .terminal::before {
+      content: '⬤  ⬤  ⬤';
+      display: block;
+      color: #35302b;
+      font-size: 0.6rem;
+      margin-bottom: 14px;
+      letter-spacing: 5px;
+    }
+
+    .terminal code {
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      line-height: 2;
+      white-space: pre;
+    }
+
+    .prompt { color: var(--blood-hot); }
+    .cmd    { color: #f5f2ec; }
+    .cmt    { color: #5f5a53; }
+
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 1em;
+      background: var(--blood-hot);
+      vertical-align: text-bottom;
+      animation: blink 1.1s step-end infinite;
+    }
+
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* ── How it works ── */
+
+    .steps { list-style: none; counter-reset: step; margin-top: 30px; }
+
+    .steps li {
+      counter-increment: step;
+      position: relative;
+      padding: 20px 0 20px 84px;
+      border-bottom: 1px dashed #241f1b;
+      color: var(--ink-dim);
+      font-size: 0.94rem;
+    }
+
+    .steps li:last-child { border-bottom: 0; }
+
+    .steps li::before {
+      content: counter(step, decimal-leading-zero);
+      position: absolute;
+      left: 0;
+      top: 12px;
+      font-family: var(--mark);
+      font-size: 2.1rem;
+      line-height: 1;
+      color: var(--blood);
+      text-shadow: 0 2px 0 #000;
+      transform: rotate(-4deg);
+    }
+
+    .steps strong { color: var(--ink); font-weight: 700; }
+
+    /* ── Feature grid ── */
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+      margin-top: 30px;
+    }
+
+    .feature {
+      position: relative;
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid #201c19;
+      padding: 22px 20px;
+      clip-path: polygon(0 2%, 99% 0, 100% 97%, 2% 100%);
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+    }
+
+    .feature:hover {
+      border-color: rgba(229, 56, 59, 0.42);
+      transform: translateY(-3px);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5), 0 0 30px rgba(179, 20, 31, 0.1);
+    }
+
+    .feature h3 {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.13em;
+      color: var(--blood-hot);
+      margin-bottom: 8px;
+    }
+
+    .feature p { font-size: 0.875rem; color: var(--ink-dim); }
+
+    /* ── Keys ── */
+
+    .keys {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 30px;
+    }
+
+    .key {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid #201c19;
+      padding: 26px 22px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .keycap {
+      flex: none;
+      min-width: 62px;
+      padding: 12px 14px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 1rem;
+      color: var(--ink);
+      background: #0c0b0a;
+      border: 1px solid var(--line);
+      border-bottom-width: 3px;
+      border-radius: 6px;
+    }
+
+    .key.force .keycap { color: #fff; border-color: var(--blood); background: #1a0c0d; }
+
+    .key h3 { font-size: 0.82rem; color: var(--ink); margin-bottom: 3px; letter-spacing: 0.04em; }
+    .key p { font-size: 0.85rem; color: var(--ash); }
+
+    /* ── Requirements ── */
+
+    .reqs { list-style: none; margin-top: 30px; display: grid; gap: 12px; }
+
+    .reqs li {
+      padding-left: 26px;
+      position: relative;
+      font-size: 0.94rem;
+      color: var(--ink-dim);
+    }
+
+    .reqs li::before {
+      content: '▸';
+      position: absolute;
+      left: 0;
+      color: var(--blood-hot);
+    }
+
+    .reqs strong { color: var(--ink); font-weight: 700; }
+
+    /* ── Links ── */
+
+    .links {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 72px;
+    }
+
+    /* ── Footer ── */
+
+    footer {
+      border-top: 1px solid #1e1a17;
+      padding-top: 30px;
+      text-align: center;
+      color: var(--ash);
+      font-size: 0.74rem;
+      letter-spacing: 0.04em;
+    }
+
+    .footer-link {
+      color: var(--blood-hot);
+      text-decoration: none;
+      transition: text-shadow 0.2s, color 0.2s;
+    }
+
+    .footer-link:hover { color: var(--ink); text-shadow: 0 0 12px rgba(229, 56, 59, 0.6); }
+
+    .sponsor-link { color: var(--ash); text-decoration: none; transition: color 0.2s; }
+    .sponsor-link .heart { color: var(--blood-hot); }
+    .sponsor-link:hover { color: var(--ink); }
+    .sponsor-link:hover .heart { text-shadow: 0 0 12px rgba(229, 56, 59, 0.8); }
+
+    .footnote { display: block; margin-top: 14px; color: #4c4842; font-size: 0.68rem; }
+    .footnote a { color: inherit; text-decoration: none; }
+    .footnote a:hover { color: var(--blood-hot); }
+
+    /* ── Focus + motion ── */
+
+    a:focus-visible {
+      outline: 2px solid var(--blood-hot);
+      outline-offset: 3px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .container { padding: 54px 18px 52px; }
+      .keys { grid-template-columns: 1fr; }
+      .steps li { padding-left: 62px; }
+      section { margin-bottom: 68px; }
+      .drips { height: 34px; background-size: 220px 32px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg"></div>
+  <div class="grain"></div>
+  <div class="vignette"></div>
+  <div class="scan"></div>
+
+  <div class="container">
+
+    <!-- ── Hero ── -->
+    <header class="hero">
+      <img class="hero-mark" src="assets/wordmark.webp" alt="hyprdie" width="820" height="779">
+
+      <p class="tagline">A graceful <em>shutdown screen</em> for Hyprland.</p>
+
+      <p class="sub">
+        hyprdie throws a fullscreen overlay over everything still running in your
+        session, asks each app to close, escalates when one refuses, and only then
+        exits. So a reboot stops silently <strong>eating unsaved work</strong>.
+      </p>
+
+      <div class="cta">
+        <a href="https://github.com/nnthnn/hyprdie" class="btn btn-primary">Get hyprdie →</a>
+        <a href="#how" class="btn btn-secondary">how it works</a>
+      </div>
+    </header>
+
+    <!-- ── Overlay mock ── -->
+    <section aria-label="Overlay preview">
+      <div class="screen" role="img" aria-label="The hyprdie overlay: a dark screen headed 'Ending session...' listing running apps above an app counter and the Esc and F key hints.">
+        <div class="screen-inner">
+          <div class="screen-title">Ending session...</div>
+          <ul class="screen-apps">
+            <li>firefox <span>— Inbox</span></li>
+            <li>kitty <span>— ~/src/hyprdie</span></li>
+            <li>spotify</li>
+            <li>vesktop <span>— friends</span></li>
+          </ul>
+          <div class="screen-count">4 apps remaining</div>
+          <div class="screen-hint"><b>ESC</b> cancel&nbsp;&nbsp;·&nbsp;&nbsp;<b>F</b> force quit</div>
+        </div>
+      </div>
+      <p class="screen-caption">one layer surface, drawn straight through <code>wl_shm</code> — no toolkit, no GTK</p>
+    </section>
+
+    <!-- ── Quickstart ── -->
+    <section id="install" aria-label="Quickstart">
+      <span class="kicker">quickstart</span>
+      <h2 class="section-title">Spray it in</h2>
+      <span class="drips" aria-hidden="true"></span>
+
+      <div class="terminal">
+        <code><span class="cmt"># build — the build script pkg-configs xkbcommon headers</span>
+<span class="prompt">▸</span> <span class="cmd">git clone https://github.com/nnthnn/hyprdie</span>
+<span class="prompt">▸</span> <span class="cmd">cargo build --release</span>
+<span class="prompt">▸</span> <span class="cmd">sudo install -Dm755 target/release/hyprdie /usr/local/bin/</span>
+
+<span class="cmt"># bind it — ~/.config/hypr/hyprland.conf</span>
+<span class="prompt">▸</span> <span class="cmd">bind = $mainMod SHIFT, E, exec, hyprdie --post-cmd 'systemctl poweroff'</span>
+
+<span class="cmt"># or see exactly what it would do before trusting it with your session</span>
+<span class="prompt">▸</span> <span class="cmd">hyprdie --dry-run</span><span class="cursor"></span></code>
+      </div>
+    </section>
+
+    <!-- ── How it works ── -->
+    <section id="how" aria-label="How it works">
+      <span class="kicker">under the hood</span>
+      <h2 class="section-title">How it kills a session</h2>
+      <span class="drips" aria-hidden="true"></span>
+
+      <ol class="steps">
+        <li>Collects the session's processes, preferring the <strong>systemd session
+          cgroup</strong> over a process-tree walk — the walk can miss apps that have been
+          reparented. It excludes Hyprland's own ancestors, so it never tears the
+          session down from under itself.</li>
+        <li>Picks up <strong>layer surfaces</strong> — bars, notification daemons — via
+          <code>hyprctl -j layers</code>, so nothing outlives the session.</li>
+        <li>Asks each window to close with <code>hyprctl dispatch closewindow</code>, and
+          sends <code>SIGTERM</code> to each process.</li>
+        <li>Retries every <code>behavior.retry_interval_ms</code> — watching the live app
+          list shrink as things fall over.</li>
+        <li>Anything still breathing after <code>behavior.sigkill_timeout_ms</code> is
+          escalated to <strong>SIGKILL</strong>.</li>
+        <li>When nothing is left, runs <code>commands.post</code> and then
+          <code>hyprctl dispatch exit</code>.</li>
+      </ol>
+    </section>
+
+    <!-- ── Features ── -->
+    <section id="features" aria-label="Features">
+      <span class="kicker">what you get</span>
+      <h2 class="section-title">Little cruelties, thoughtfully applied</h2>
+      <span class="drips" aria-hidden="true"></span>
+
+      <div class="features">
+        <div class="feature">
+          <h3>Graceful first</h3>
+          <p>Every app gets a polite <code>closewindow</code> and a <code>SIGTERM</code> before anything is killed. Only the stubborn ones get escalated.</p>
+        </div>
+        <div class="feature">
+          <h3>Escalation on a timer</h3>
+          <p>Refusing to die just delays the inevitable: after a configurable timeout, <code>SIGKILL</code> lands automatically.</p>
+        </div>
+        <div class="feature">
+          <h3>Live app list</h3>
+          <p>The overlay re-polls <code>hyprctl -j clients</code> every tick, so closed apps vanish and the remaining count ticks down as you watch.</p>
+        </div>
+        <div class="feature">
+          <h3>Layer surfaces too</h3>
+          <p>Bars and notification daemons are pulled in via <code>hyprctl -j layers</code> instead of being left to outlive the session.</p>
+        </div>
+        <div class="feature">
+          <h3>Never kills its own session</h3>
+          <p>Hyprland's ancestors — the display manager's session helper and the launcher — are subtracted from the kill set, and hyprdie removes its own PID every poll.</p>
+        </div>
+        <div class="feature">
+          <h3>Post command ordering</h3>
+          <p><code>commands.post</code> runs <em>before</em> Hyprland exits and hyprdie waits for it, so <code>systemctl reboot</code> can authorise with logind while the session is alive.</p>
+        </div>
+        <div class="feature">
+          <h3>Dry run</h3>
+          <p><code>--dry-run</code> shows the overlay and closes nothing — the safe way to see what it does before binding it to a key.</p>
+        </div>
+        <div class="feature">
+          <h3>Background image</h3>
+          <p>Point <code>ui.background</code> at a file and it's cover-scaled to the output. The format is sniffed from the content, not the extension.</p>
+        </div>
+        <div class="feature">
+          <h3>Configurable to the bone</h3>
+          <p>Title, every text colour, timings, and the command that runs last — all optional in <code>~/.config/hyprdie/config.toml</code>.</p>
+        </div>
+        <div class="feature">
+          <h3>Hard to kill by accident</h3>
+          <p>Closing the terminal that launched it won't take it down — <code>SIGHUP</code> is ignored so it survives long enough to finish the job.</p>
+        </div>
+        <div class="feature">
+          <h3>No toolkit</h3>
+          <p>The surface is ARGB <code>wl_shm</code> through <code>smithay-client-toolkit</code>. No GTK, no winit, no runtime dependencies beyond Hyprland and systemd.</p>
+        </div>
+        <div class="feature">
+          <h3>Safe fallback discovery</h3>
+          <p>When there's no session cgroup to lean on, it walks the process tree instead. It may miss a reparented app, but it never reaches Hyprland's own ancestors.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Keys ── -->
+    <section id="keys" aria-label="Keys">
+      <span class="kicker">controls</span>
+      <h2 class="section-title">Two keys. That's the whole UI.</h2>
+      <span class="drips" aria-hidden="true"></span>
+
+      <div class="keys">
+        <div class="key">
+          <div class="keycap">ESC</div>
+          <div>
+            <h3>Cancel</h3>
+            <p>Closes nothing and leaves the session running. The escape hatch.</p>
+          </div>
+        </div>
+        <div class="key force">
+          <div class="keycap">F</div>
+          <div>
+            <h3>Force</h3>
+            <p>Kills every tracked process at once with <code>SIGKILL</code>, then continues the shutdown. Only changes <em>how</em> apps close — the post command and exit still run.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Requirements ── -->
+    <section id="requirements" aria-label="Requirements">
+      <span class="kicker">before you start</span>
+      <h2 class="section-title">What it needs</h2>
+      <span class="drips" aria-hidden="true"></span>
+
+      <ul class="reqs">
+        <li><strong>Hyprland.</strong> hyprdie checks <code>HYPRLAND_INSTANCE_SIGNATURE</code> at startup and bails with a clear message if it isn't set.</li>
+        <li><strong>systemd</strong>, for the session cgroup. Without one it falls back to walking the process tree.</li>
+        <li><strong>xkbcommon headers</strong> to build — <code>libxkbcommon-dev</code> on Debian/Ubuntu, <code>xkbcommon</code> on Arch. Even <code>cargo check</code> needs them.</li>
+      </ul>
+    </section>
+
+    <!-- ── Links ── -->
+    <div class="links">
+      <a href="https://github.com/nnthnn/hyprdie" class="btn btn-primary">GitHub →</a>
+      <a href="https://github.com/nnthnn/hyprdie#readme" class="btn btn-secondary">readme</a>
+      <a href="https://github.com/nnthnn/hyprdie/blob/main/config.example.toml" class="btn btn-secondary">config</a>
+    </div>
+
+    <footer>
+      MIT · built for Hyprland · made by
+      <a href="https://github.com/nnthnn" class="footer-link">nathan</a> ·
+      <a href="https://ko-fi.com/nnthnn" class="sponsor-link"><span class="heart">♥</span> sponsor</a>
+      <span class="footnote">It only looks like a threat. Nothing is killed until you say so.</span>
+    </footer>
+  </div>
+</body>
+</html>
