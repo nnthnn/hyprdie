@@ -8,6 +8,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/nnthnn/hyprdie/actions/workflows/ci.yml"><img src="https://github.com/nnthnn/hyprdie/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://ko-fi.com/nnthnn"><img src="https://img.shields.io/badge/support-ko--fi-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
+</p>
+
 **A graceful shutdown screen for Hyprland.**
 
 hyprdie puts up a fullscreen overlay listing everything still running in your
@@ -29,9 +34,31 @@ exits the session. So a reboot stops silently eating unsaved work.
 
 ## Build
 
+The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust
+1.98.1 + rustfmt + clippy), so build with `rustup` if you want a matching
+compiler — distro packages ignore the pin.
+
+`smithay-client-toolkit`'s build script `pkg-config`s **xkbcommon**, so the
+development headers are needed even for `cargo check`:
+
+```sh
+sudo apt install libxkbcommon-dev   # Debian/Ubuntu
+sudo pacman -S xkbcommon            # Arch
+```
+
+Then:
+
 ```sh
 cargo build --release
 # target/release/hyprdie
+```
+
+The checks CI runs, all of which work without a compositor:
+
+```sh
+cargo test
+cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
 ```
 
 ## Usage
