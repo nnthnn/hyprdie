@@ -23,7 +23,14 @@ cargo test                                         # unit tests, no compositor n
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings # CI denies warnings
 cargo deny check advisories                        # optional, needs cargo-deny
+./install-hooks.sh                                 # one-time: enable the git hooks below
 ```
+
+Run `./install-hooks.sh` once per clone to point `core.hooksPath` at the tracked
+[`.githooks/`](.githooks/). It's repo-level config, so it covers every worktree.
+The `pre-commit` hook auto-formats staged `.rs` files; `pre-push` runs
+`cargo fmt --all --check` and the clippy command above, so the local checks
+match CI's lint job.
 
 Toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust 1.98.1
 + rustfmt + clippy). Building needs **xkbcommon** headers (`libxkbcommon-dev` on

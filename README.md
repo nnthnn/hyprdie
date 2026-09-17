@@ -61,6 +61,16 @@ cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
+To have those checks run for you, enable the tracked git hooks once:
+
+```sh
+./install-hooks.sh
+```
+
+`pre-commit` formats staged Rust files and folds the result into the commit;
+`pre-push` runs the formatting and clippy checks before anything leaves your
+machine. Both are just `cargo` invocations — nothing extra to install.
+
 ## Usage
 
 ```sh
