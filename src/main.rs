@@ -391,7 +391,11 @@ fn collect_layer_pids(raw: &str) -> HashSet<i32> {
         .collect()
 }
 
-fn begin_shutdown(state: &mut ShutdownState) {
+/// Collect the processes to tear down along with the session. This only gathers
+/// state; the close sequence waits until the overlay has actually been
+/// presented (see `Ui::start_closing`), so apps don't start disappearing before
+/// the user can see what's happening.
+fn discover(state: &mut ShutdownState) {
     if let Ok(raw) = hyprctl(&["-j", "instances"])
         && let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw)
         && let Some(pid) = items
@@ -401,9 +405,6 @@ fn begin_shutdown(state: &mut ShutdownState) {
         state.hypr_children = session_descendants(pid);
     }
     refresh_clients(state);
-    if !state.config.behavior.dry_run {
-        retry_close(state);
-    }
 }
 fn retry_close(state: &mut ShutdownState) {
     for address in &state.addresses {
@@ -601,6 +602,9 @@ struct Ui {
     width: u32,
     height: u32,
     first_configure: bool,
+    /// Set once the overlay has been presented and the close sequence has been
+    /// kicked off; keeps `frame` and `tick` from starting it twice.
+    close_started: bool,
     image: Option<DynamicImage>,
     apps: Vec<(String, String)>,
     count: usize,
@@ -740,6 +744,21 @@ impl Ui {
         let _ = buffer.attach_to(self.layer.wl_surface());
         self.layer.commit();
     }
+    /// Kick off the graceful close sequence. This runs from the first frame
+    /// callback — i.e. once the compositor has the overlay on screen — so apps
+    /// don't start vanishing before the user can see why.
+    fn start_closing(&mut self) {
+        if self.close_started {
+            return;
+        }
+        self.close_started = true;
+        let mut state = self.shared.lock().unwrap();
+        if state.config.behavior.dry_run {
+            return;
+        }
+        retry_close(&mut state);
+        state.last_retry = Instant::now();
+    }
     fn finish(&mut self, force: bool) {
         let state = self.shared.lock().unwrap();
         if state.config.behavior.dry_run {
@@ -774,7 +793,9 @@ impl Ui {
         self.last_poll = Instant::now();
         let mut state = self.shared.lock().unwrap();
         refresh_clients(&mut state);
-        if !state.config.behavior.dry_run {
+        // Nothing is closed until the first frame callback fires, so don't treat
+        // an empty (or already-closed) session as "done" before then.
+        if !state.config.behavior.dry_run && self.close_started {
             if alive(&state.pids) == 0 {
                 drop(state);
                 self.finish(false);
@@ -819,6 +840,7 @@ impl CompositorHandler for Ui {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
+        self.start_closing();
     }
     fn surface_enter(
         &mut self,
@@ -852,8 +874,8 @@ impl LayerShellHandler for Ui {
     fn configure(
         &mut self,
         _: &Connection,
-        _qh: &QueueHandle<Self>,
-        _: &LayerSurface,
+        qh: &QueueHandle<Self>,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
@@ -866,6 +888,12 @@ impl LayerShellHandler for Ui {
         }
         if self.first_configure {
             self.first_configure = false;
+            // Request the frame callback *before* committing the first buffer:
+            // it fires once the compositor has the overlay on screen, which is
+            // when `frame` starts closing apps. Waiting avoids closing them
+            // before the user ever sees the overlay.
+            let surface = layer.wl_surface();
+            surface.frame(qh, surface.clone());
             self.draw();
         }
     }
@@ -1063,7 +1091,7 @@ fn main() {
         });
     let mut event_loop = EventLoop::<Ui>::try_new().expect("could not create event loop");
     let stop = event_loop.get_signal();
-    begin_shutdown(&mut shared.lock().unwrap());
+    discover(&mut shared.lock().unwrap());
     let apps = shared.lock().unwrap().apps.clone();
     let count = apps.len();
     let font = load_font();
@@ -1081,6 +1109,7 @@ fn main() {
         width: 1,
         height: 1,
         first_configure: true,
+        close_started: false,
         image,
         apps,
         count,
