@@ -34,9 +34,8 @@ exits the session. So a reboot stops silently eating unsaved work.
 
 ## Build
 
-The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust
-1.98.1 + rustfmt + clippy), so build with `rustup` if you want a matching
-compiler — distro packages ignore the pin.
+Builds with any recent stable Rust toolchain (`rustfmt` and `clippy` for the
+checks below).
 
 `smithay-client-toolkit`'s build script `pkg-config`s **xkbcommon**, so the
 development headers are needed even for `cargo check`:
