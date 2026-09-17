@@ -42,7 +42,7 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
 };
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 struct Config {
     ui: UiConfig,
@@ -127,15 +127,6 @@ impl Default for UiColors {
             app: Rgb::new(0xac, 0xb5, 0xc7),
             hint: Rgb::new(0x80, 0x80, 0x80),
             background: Rgb::new(0x1b, 0x18, 0x18),
-        }
-    }
-}
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            ui: UiConfig::default(),
-            behavior: BehaviorConfig::default(),
-            commands: CommandConfig::default(),
         }
     }
 }
@@ -366,15 +357,13 @@ fn collect_layer_pids(raw: &str) -> HashSet<i32> {
 }
 
 fn begin_shutdown(state: &mut ShutdownState) {
-    if let Ok(raw) = hyprctl(&["-j", "instances"]) {
-        if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-            if let Some(pid) = items
-                .iter()
-                .find_map(|i| i.get("pid").and_then(|v| v.as_i64()).map(|p| p as i32))
-            {
-                state.hypr_children = session_descendants(pid);
-            }
-        }
+    if let Ok(raw) = hyprctl(&["-j", "instances"])
+        && let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw)
+        && let Some(pid) = items
+            .iter()
+            .find_map(|i| i.get("pid").and_then(|v| v.as_i64()).map(|p| p as i32))
+    {
+        state.hypr_children = session_descendants(pid);
     }
     refresh_clients(state);
     if !state.config.behavior.dry_run {
@@ -414,10 +403,10 @@ fn load_font() -> Option<FontVec> {
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
     ];
     for path in CANDIDATES {
-        if let Ok(bytes) = fs::read(path) {
-            if let Ok(font) = FontVec::try_from_vec(bytes) {
-                return Some(font);
-            }
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(bytes)
+        {
+            return Some(font);
         }
     }
     None
@@ -431,6 +420,12 @@ fn measure_text(font: &FontVec, text: &str, size: f32) -> f32 {
         .sum()
 }
 
+/// One line of overlay text: `(text, size, line_height, colour)`.
+type TextLine = (String, f32, f32, (u8, u8, u8));
+
+// A low-level text blitter. The parameters are all genuinely independent, so
+// bundling them into a struct would add ceremony without clarifying much.
+#[allow(clippy::too_many_arguments)]
 fn blend_text(
     canvas: &mut [u8],
     width: u32,
@@ -572,7 +567,7 @@ impl Ui {
             let state = self.shared.lock().unwrap();
             (state.config.behavior.dry_run, state.config.ui.colors)
         };
-        let Ok((buffer, mut canvas)) = self.pool.create_buffer(
+        let Ok((buffer, canvas)) = self.pool.create_buffer(
             width as i32,
             height as i32,
             stride,
@@ -584,7 +579,12 @@ impl Ui {
             let scaled = image
                 .resize_to_fill(width, height, FilterType::Triangle)
                 .to_rgba8();
-            for (chunk, pixel) in canvas.chunks_exact_mut(4).zip(scaled.pixels()) {
+            for (chunk, pixel) in canvas
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(scaled.pixels())
+            {
                 chunk.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }
         } else {
@@ -594,7 +594,7 @@ impl Ui {
                 colors.background.b,
                 0xff,
             ];
-            for chunk in canvas.chunks_exact_mut(4) {
+            for chunk in canvas.as_chunks_mut::<4>().0 {
                 chunk.copy_from_slice(&solid);
             }
         }
@@ -603,8 +603,7 @@ impl Ui {
             let heading_color = colors.heading.rgb();
             let app_color = colors.app.rgb();
             let hint_color = colors.hint.rgb();
-            let mut lines: Vec<(String, f32, f32, (u8, u8, u8))> =
-                vec![(self.title.clone(), 44.0, 60.0, title_color)];
+            let mut lines: Vec<TextLine> = vec![(self.title.clone(), 44.0, 60.0, title_color)];
             let noun = if self.count == 1 { "app" } else { "apps" };
             let header = if dry_run {
                 format!("Dry run — {} {noun} would be closed:", self.count)
@@ -631,7 +630,7 @@ impl Ui {
                 let line_width = measure_text(font, text, *size);
                 let x = (width as f32 - line_width) / 2.0;
                 y = blend_text(
-                    &mut canvas,
+                    canvas,
                     width,
                     height,
                     font,
@@ -652,16 +651,7 @@ impl Ui {
             let hint_x = (width as f32 - measure_text(font, &hint, hint_size)) / 2.0;
             let hint_y = height as f32 - 40.0;
             blend_text(
-                &mut canvas,
-                width,
-                height,
-                font,
-                &hint,
-                hint_x,
-                hint_y,
-                hint_size,
-                0.0,
-                hint_color,
+                canvas, width, height, font, &hint, hint_x, hint_y, hint_size, 0.0, hint_color,
             );
         }
         self.layer
@@ -785,8 +775,8 @@ impl LayerShellHandler for Ui {
         _: u32,
     ) {
         if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
-            self.width = configure.new_size.0 as u32;
-            self.height = configure.new_size.1 as u32;
+            self.width = configure.new_size.0;
+            self.height = configure.new_size.1;
         } else if let Some((width, height)) = self.output_size() {
             self.width = width;
             self.height = height;
