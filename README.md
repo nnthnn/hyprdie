@@ -96,6 +96,8 @@ hyprdie --post-cmd 'systemctl poweroff'   # ... and power off afterwards
 hyprdie --post-cmd 'systemctl reboot'
 hyprdie --dry-run                         # show the overlay, close nothing
 hyprdie --config /path/to/config.toml     # use a specific config file
+hyprdie --help                            # option list
+hyprdie --version                         # print the version
 ```
 
 `--dry-run` is the safe way to see what it does before you bind it to a key.
@@ -136,14 +138,16 @@ use on a wedged app.
    launcher), so it never tears down the session out from under itself.
 2. Picks up **layer surfaces** (bars, notification daemons) via `hyprctl -j layers`
    so they don't outlive the session.
-3. Asks each window to close with `hyprctl dispatch closewindow`, and sends
+3. Puts the overlay on screen and waits for the first presented frame before
+   closing anything, so apps don't start vanishing before you can see why.
+4. Asks each window to close with `hyprctl dispatch closewindow`, and sends
    `SIGTERM` to each process.
-4. Retries every `behavior.retry_interval_ms`.
-5. Anything still alive after `behavior.sigkill_timeout_ms` is escalated to `SIGKILL`.
-6. Once nothing is left, runs `commands.post` and then `hyprctl dispatch exit`.
+5. Retries every `behavior.retry_interval_ms`.
+6. Anything still alive after `behavior.sigkill_timeout_ms` is escalated to `SIGKILL`.
+7. Once nothing is left, runs `commands.post` and then `hyprctl dispatch exit`.
 
 Closing the terminal that launched hyprdie won't kill it: it ignores `SIGHUP` so
-it survives long enough to reach step 6.
+it survives long enough to reach step 7.
 
 ## Configuration
 

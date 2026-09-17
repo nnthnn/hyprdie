@@ -30,7 +30,7 @@ use smithay_client_toolkit::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -391,7 +391,11 @@ fn collect_layer_pids(raw: &str) -> HashSet<i32> {
         .collect()
 }
 
-fn begin_shutdown(state: &mut ShutdownState) {
+/// Collect the processes to tear down along with the session. This only gathers
+/// state; the close sequence waits until the overlay has actually been
+/// presented (see `Ui::start_closing`), so apps don't start disappearing before
+/// the user can see what's happening.
+fn discover(state: &mut ShutdownState) {
     if let Ok(raw) = hyprctl(&["-j", "instances"])
         && let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&raw)
         && let Some(pid) = items
@@ -401,9 +405,6 @@ fn begin_shutdown(state: &mut ShutdownState) {
         state.hypr_children = session_descendants(pid);
     }
     refresh_clients(state);
-    if !state.config.behavior.dry_run {
-        retry_close(state);
-    }
 }
 fn retry_close(state: &mut ShutdownState) {
     for address in &state.addresses {
@@ -447,6 +448,12 @@ fn alive(pids: &HashSet<i32>) -> usize {
 
 /// How long to let the post command run before giving up on it.
 const POST_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait for the first frame callback before starting the close
+/// sequence anyway. The callback is the intended trigger (see
+/// `Ui::start_closing`); this only keeps a compositor that never sends one from
+/// wedging shutdown on the overlay.
+const CLOSE_FALLBACK_DELAY: Duration = Duration::from_secs(1);
 
 /// Run the post command and wait for it to finish.
 ///
@@ -552,43 +559,257 @@ fn blend_text(
     y
 }
 
-#[derive(Default)]
+/// A single ANSI style: an optional 24-bit colour and a bold flag. `paint` is a
+/// no-op when colour is disabled, so callers can build a line unconditionally
+/// and let the terminal decide.
+#[derive(Clone, Copy)]
+struct Style {
+    rgb: Option<(u8, u8, u8)>,
+    bold: bool,
+}
+
+impl Style {
+    const fn fg(r: u8, g: u8, b: u8) -> Self {
+        Self {
+            rgb: Some((r, g, b)),
+            bold: false,
+        }
+    }
+
+    fn paint(self, text: &str, color: bool) -> String {
+        if !color {
+            return text.to_owned();
+        }
+        let mut out = String::new();
+        if self.bold {
+            out.push_str("\x1b[1m");
+        }
+        if let Some((r, g, b)) = self.rgb {
+            out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+        }
+        out.push_str(text);
+        out.push_str("\x1b[0m");
+        out
+    }
+}
+
+// Muted palette, echoing the overlay's default `[ui.colors]` so the console and
+// the shutdown screen read as the same tool. Deliberately not bright.
+const HEADING: Style = Style {
+    rgb: Some((0xd8, 0xde, 0xe9)),
+    bold: true,
+};
+const ACCENT: Style = Style::fg(0xac, 0xb5, 0xc7);
+const MUTED: Style = Style::fg(0x80, 0x80, 0x80);
+const ERROR: Style = Style {
+    rgb: Some((0xb8, 0x66, 0x66)),
+    bold: true,
+};
+const WARNING: Style = Style::fg(0xb0, 0x9a, 0x6a);
+
+const USAGE: &str = "hyprdie [OPTIONS]";
+
+/// Whether to emit ANSI colour for a stream. Colour is for a human at a
+/// terminal only: pipes and log files get plain text, and `NO_COLOR` opts out
+/// even on a TTY.
+fn color_enabled(is_terminal: bool) -> bool {
+    is_terminal && !no_color()
+}
+
+fn no_color() -> bool {
+    env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+fn stderr_color() -> bool {
+    color_enabled(std::io::stderr().is_terminal())
+}
+
+/// "hyprdie" shaded from grey to slate. The gradient is the one flourish,
+/// mirroring hypr-recall's bin name in this project's quieter palette.
+fn wordmark(color: bool) -> String {
+    const TEXT: &str = "hyprdie";
+    const FROM: (f32, f32, f32) = (0x6b as f32, 0x72 as f32, 0x80 as f32);
+    const TO: (f32, f32, f32) = (0xac as f32, 0xb5 as f32, 0xc7 as f32);
+    if !color {
+        return TEXT.to_owned();
+    }
+    let steps = (TEXT.len() - 1).max(1) as f32;
+    let mut out = String::from("\x1b[1m");
+    for (index, ch) in TEXT.chars().enumerate() {
+        let frac = index as f32 / steps;
+        let r = (FROM.0 + (TO.0 - FROM.0) * frac) as u8;
+        let g = (FROM.1 + (TO.1 - FROM.1) * frac) as u8;
+        let b = (FROM.2 + (TO.2 - FROM.2) * frac) as u8;
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{ch}"));
+    }
+    out.push_str("\x1b[0m");
+    out
+}
+
+/// The banner line at the top of `--help`. The tombstone sits outside the
+/// gradient: terminals render emoji in their own colours, so there's nothing
+/// useful to tint.
+fn title_line(color: bool) -> String {
+    format!(
+        "🪦 {} — a graceful shutdown screen for Hyprland",
+        wordmark(color)
+    )
+}
+
+/// The `--version` line. The version comes from `Cargo.toml` at compile time,
+/// so it can't drift from the released binary.
+fn version_line(color: bool) -> String {
+    format!("🪦 {} {}", wordmark(color), env!("CARGO_PKG_VERSION"))
+}
+
+fn print_version() {
+    let color = color_enabled(std::io::stdout().is_terminal());
+    println!("{}", version_line(color));
+}
+
+fn print_help() {
+    let color = color_enabled(std::io::stdout().is_terminal());
+    println!("{}", title_line(color));
+    println!();
+    println!(
+        "{} {}",
+        HEADING.paint("Usage:", color),
+        ACCENT.paint(USAGE, color)
+    );
+    println!();
+    println!("{}", HEADING.paint("Options:", color));
+    option_row(
+        color,
+        "    --dry-run",
+        None,
+        "Show the overlay and close nothing",
+    );
+    option_row(
+        color,
+        "    --post-cmd",
+        Some("<CMD>"),
+        "Run CMD before exiting Hyprland",
+    );
+    option_row(
+        color,
+        "    --config",
+        Some("<PATH>"),
+        "Read configuration from PATH",
+    );
+    option_row(color, "-h, --help", None, "Print this help");
+    option_row(color, "-V, --version", None, "Print version");
+}
+
+/// One `Options:` row. The flags and value are painted separately so the value
+/// reads as a placeholder, but the padding is measured from the plain text so
+/// ANSI escapes don't throw the description column off.
+fn option_row(color: bool, flags: &str, value: Option<&str>, description: &str) {
+    const DESCRIPTION_COLUMN: usize = 30;
+    let mut plain = format!("  {flags}");
+    if let Some(value) = value {
+        plain.push(' ');
+        plain.push_str(value);
+    }
+    let padding = " ".repeat(DESCRIPTION_COLUMN.saturating_sub(plain.len()));
+    let mut rendered = ACCENT.paint(&format!("  {flags}"), color);
+    if let Some(value) = value {
+        rendered.push(' ');
+        rendered.push_str(&MUTED.paint(value, color));
+    }
+    println!("{rendered}{padding}{description}");
+}
+
+/// Print a parse error in the same style as `--help`, followed by the usage
+/// line.
+fn print_error(message: &str) {
+    let color = stderr_color();
+    eprintln!("{} {message}", ERROR.paint("error:", color));
+    eprintln!(
+        "{} {}",
+        HEADING.paint("Usage:", color),
+        ACCENT.paint(USAGE, color)
+    );
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
 struct CliOptions {
     dry_run: bool,
     post_command: Option<String>,
     config_path: Option<PathBuf>,
 }
-fn cli_options() -> CliOptions {
+
+/// What the parser decided the arguments mean. `Help` and `Version` are not
+/// errors: they're requests to print and exit successfully.
+#[derive(Debug, PartialEq, Eq)]
+enum CliOutcome {
+    Options(CliOptions),
+    Help,
+    Version,
+}
+
+/// A command-line parse failure. A typed error rather than a `String` keeps the
+/// messages testable and lets the caller choose how to render them.
+#[derive(Debug, PartialEq, Eq)]
+enum CliError {
+    UnknownOption(String),
+    MissingValue(&'static str),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::UnknownOption(option) => write!(f, "unknown option: {option}"),
+            CliError::MissingValue(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Parse arguments (excluding the program name).
+///
+/// Returning a result instead of printing and exiting keeps this testable; the
+/// thin `cli_options` wrapper below handles the exit.
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOutcome, CliError> {
     let mut options = CliOptions::default();
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dry-run" => options.dry_run = true,
             "--post-cmd" => {
-                options.post_command = args.next().or_else(|| {
-                    eprintln!("--post-cmd requires a command");
-                    process::exit(2)
-                })
+                options.post_command = Some(
+                    args.next()
+                        .ok_or(CliError::MissingValue("--post-cmd requires a command"))?,
+                );
             }
             "--config" => {
-                options.config_path = args.next().map(PathBuf::from).or_else(|| {
-                    eprintln!("--config requires a path");
-                    process::exit(2)
-                })
+                options.config_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or(CliError::MissingValue("--config requires a path"))?,
+                ));
             }
-            "--help" | "-h" => {
-                println!("Usage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]");
-                process::exit(0);
-            }
-            unknown => {
-                eprintln!(
-                    "unknown option: {unknown}\nUsage: hyprdie [--dry-run] [--post-cmd COMMAND] [--config PATH]"
-                );
-                process::exit(2);
-            }
+            "--help" | "-h" => return Ok(CliOutcome::Help),
+            "--version" | "-V" => return Ok(CliOutcome::Version),
+            unknown => return Err(CliError::UnknownOption(unknown.to_owned())),
         }
     }
-    options
+    Ok(CliOutcome::Options(options))
+}
+
+fn cli_options() -> CliOptions {
+    match parse_args(env::args().skip(1)) {
+        Ok(CliOutcome::Options(options)) => options,
+        Ok(CliOutcome::Help) => {
+            print_help();
+            process::exit(0);
+        }
+        Ok(CliOutcome::Version) => {
+            print_version();
+            process::exit(0);
+        }
+        Err(error) => {
+            print_error(&error.to_string());
+            process::exit(2);
+        }
+    }
 }
 
 struct Ui {
@@ -601,6 +822,12 @@ struct Ui {
     width: u32,
     height: u32,
     first_configure: bool,
+    /// Set once the overlay has been presented and the close sequence has been
+    /// kicked off; keeps `frame` and `tick` from starting it twice.
+    close_started: bool,
+    /// When the surface was first configured, used to bound how long we wait
+    /// for the frame callback before falling back to closing anyway.
+    configured_at: Option<Instant>,
     image: Option<DynamicImage>,
     apps: Vec<(String, String)>,
     count: usize,
@@ -740,6 +967,21 @@ impl Ui {
         let _ = buffer.attach_to(self.layer.wl_surface());
         self.layer.commit();
     }
+    /// Kick off the graceful close sequence. This runs from the first frame
+    /// callback — i.e. once the compositor has the overlay on screen — so apps
+    /// don't start vanishing before the user can see why.
+    fn start_closing(&mut self) {
+        if self.close_started {
+            return;
+        }
+        self.close_started = true;
+        let mut state = self.shared.lock().unwrap();
+        if state.config.behavior.dry_run {
+            return;
+        }
+        retry_close(&mut state);
+        state.last_retry = Instant::now();
+    }
     fn finish(&mut self, force: bool) {
         let state = self.shared.lock().unwrap();
         if state.config.behavior.dry_run {
@@ -772,9 +1014,19 @@ impl Ui {
             return;
         }
         self.last_poll = Instant::now();
+        // Backstop for `frame`: if the compositor has configured the overlay but
+        // never delivered a frame callback, don't leave the user stuck on it.
+        if !self.close_started
+            && let Some(configured_at) = self.configured_at
+            && configured_at.elapsed() >= CLOSE_FALLBACK_DELAY
+        {
+            self.start_closing();
+        }
         let mut state = self.shared.lock().unwrap();
         refresh_clients(&mut state);
-        if !state.config.behavior.dry_run {
+        // Nothing is closed until the first frame callback fires, so don't treat
+        // an empty (or already-closed) session as "done" before then.
+        if !state.config.behavior.dry_run && self.close_started {
             if alive(&state.pids) == 0 {
                 drop(state);
                 self.finish(false);
@@ -819,6 +1071,7 @@ impl CompositorHandler for Ui {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
+        self.start_closing();
     }
     fn surface_enter(
         &mut self,
@@ -852,20 +1105,32 @@ impl LayerShellHandler for Ui {
     fn configure(
         &mut self,
         _: &Connection,
-        _qh: &QueueHandle<Self>,
-        _: &LayerSurface,
+        qh: &QueueHandle<Self>,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
-            self.width = configure.new_size.0;
-            self.height = configure.new_size.1;
-        } else if let Some((width, height)) = self.output_size() {
-            self.width = width;
-            self.height = height;
-        }
+        let (width, height) = if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
+            (configure.new_size.0, configure.new_size.1)
+        } else {
+            self.output_size().unwrap_or((self.width, self.height))
+        };
+        let size_changed = width != self.width || height != self.height;
+        self.width = width;
+        self.height = height;
         if self.first_configure {
             self.first_configure = false;
+            self.configured_at = Some(Instant::now());
+            // Request the frame callback *before* committing the first buffer:
+            // it fires once the compositor has the overlay on screen, which is
+            // when `frame` starts closing apps. Waiting avoids closing them
+            // before the user ever sees the overlay.
+            let surface = layer.wl_surface();
+            surface.frame(qh, surface.clone());
+            self.draw();
+        } else if size_changed {
+            // A later configure (monitor hotplug, resolution change) resizes the
+            // surface; redraw or the overlay keeps a buffer at the old size.
             self.draw();
         }
     }
@@ -980,9 +1245,17 @@ delegate_layer!(Ui);
 delegate_registry!(Ui);
 
 fn main() {
+    // Parse before the Hyprland guard so `--help` and argument errors work
+    // anywhere, not only inside a session.
+    let options = cli_options();
+
     // Check that we're actually running under Hyprland
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_err() {
-        eprintln!("Error: HYPRLAND_INSTANCE_SIGNATURE not found. Are you running under Hyprland?");
+        let color = stderr_color();
+        eprintln!(
+            "{} HYPRLAND_INSTANCE_SIGNATURE not found. Are you running under Hyprland?",
+            ERROR.paint("error:", color)
+        );
         eprintln!("hyprdie must be run from within a Hyprland session.");
         process::exit(1);
     }
@@ -993,7 +1266,6 @@ fn main() {
     unsafe {
         let _ = signal(Signal::SIGHUP, SigHandler::SigIgn);
     }
-    let options = cli_options();
     let explicit_config = options.config_path.is_some();
     let config_file = options.config_path.clone().unwrap_or_else(config_path);
     let mut config = match load_config(&config_file) {
@@ -1001,12 +1273,17 @@ fn main() {
         // An explicitly requested config that can't be read is an error: silently
         // falling back to defaults would run with settings the user didn't ask
         // for. The default location is different — it's often absent, so warn.
-        Err(e) if explicit_config => {
-            eprintln!("error: {e}");
+        Err(error) if explicit_config => {
+            let color = stderr_color();
+            eprintln!("{} {error}", ERROR.paint("error:", color));
             process::exit(1);
         }
-        Err(e) => {
-            eprintln!("warning: {e}; using defaults");
+        Err(error) => {
+            let color = stderr_color();
+            eprintln!(
+                "{} {error}; using defaults",
+                WARNING.paint("warning:", color)
+            );
             Config::default()
         }
     };
@@ -1063,7 +1340,7 @@ fn main() {
         });
     let mut event_loop = EventLoop::<Ui>::try_new().expect("could not create event loop");
     let stop = event_loop.get_signal();
-    begin_shutdown(&mut shared.lock().unwrap());
+    discover(&mut shared.lock().unwrap());
     let apps = shared.lock().unwrap().apps.clone();
     let count = apps.len();
     let font = load_font();
@@ -1081,6 +1358,8 @@ fn main() {
         width: 1,
         height: 1,
         first_configure: true,
+        close_started: false,
+        configured_at: None,
         image,
         apps,
         count,
@@ -1258,5 +1537,128 @@ mod tests {
                 b: 0x18
             }
         );
+    }
+
+    #[test]
+    fn parses_cli_flags() {
+        let args = [
+            "--dry-run",
+            "--post-cmd",
+            "systemctl reboot",
+            "--config",
+            "/tmp/hyprdie.toml",
+        ]
+        .map(String::from);
+        let Ok(CliOutcome::Options(options)) = parse_args(args) else {
+            panic!("expected parsed options");
+        };
+        assert!(options.dry_run);
+        assert_eq!(options.post_command.as_deref(), Some("systemctl reboot"));
+        assert_eq!(
+            options.config_path.as_deref(),
+            Some(Path::new("/tmp/hyprdie.toml"))
+        );
+    }
+
+    #[test]
+    fn empty_cli_is_all_defaults() {
+        let Ok(CliOutcome::Options(options)) = parse_args(std::iter::empty::<String>()) else {
+            panic!("expected parsed options");
+        };
+        assert_eq!(options, CliOptions::default());
+    }
+
+    #[test]
+    fn help_is_not_an_error() {
+        assert_eq!(parse_args([String::from("--help")]), Ok(CliOutcome::Help));
+        assert_eq!(parse_args([String::from("-h")]), Ok(CliOutcome::Help));
+    }
+
+    #[test]
+    fn version_is_not_an_error() {
+        assert_eq!(
+            parse_args([String::from("--version")]),
+            Ok(CliOutcome::Version)
+        );
+        assert_eq!(parse_args([String::from("-V")]), Ok(CliOutcome::Version));
+    }
+
+    #[test]
+    fn version_line_reports_the_crate_version() {
+        let plain = version_line(false);
+        assert!(plain.contains(env!("CARGO_PKG_VERSION")), "{plain}");
+        assert!(plain.contains("hyprdie"), "{plain}");
+    }
+
+    #[test]
+    fn options_missing_a_value_are_errors() {
+        assert_eq!(
+            parse_args([String::from("--post-cmd")]),
+            Err(CliError::MissingValue("--post-cmd requires a command"))
+        );
+        assert_eq!(
+            parse_args([String::from("--config")]),
+            Err(CliError::MissingValue("--config requires a path"))
+        );
+    }
+
+    #[test]
+    fn unknown_option_is_an_error() {
+        assert_eq!(
+            parse_args([String::from("--nope")]),
+            Err(CliError::UnknownOption("--nope".to_owned()))
+        );
+    }
+
+    #[test]
+    fn paint_is_plain_without_colour() {
+        assert_eq!(ACCENT.paint("--dry-run", false), "--dry-run");
+        assert_eq!(ERROR.paint("error:", false), "error:");
+    }
+
+    #[test]
+    fn paint_wraps_text_in_ansi_when_enabled() {
+        let painted = ACCENT.paint("--dry-run", true);
+        assert!(painted.contains("--dry-run"));
+        assert!(painted.starts_with("\x1b["));
+        assert!(painted.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn wordmark_is_plain_without_colour() {
+        assert_eq!(wordmark(false), "hyprdie");
+    }
+
+    #[test]
+    fn title_line_has_the_tombstone_and_wordmark() {
+        let plain = title_line(false);
+        assert!(plain.starts_with('🪦'), "{plain}");
+        assert!(plain.contains("hyprdie"), "{plain}");
+        // Colour, when on, tints the wordmark but never the tombstone.
+        assert!(title_line(true).contains("🪦"));
+    }
+
+    #[test]
+    fn wordmark_colours_each_letter_independently() {
+        let painted = wordmark(true);
+        for ch in "hyprdie".chars() {
+            assert!(painted.contains(ch), "missing {ch}");
+        }
+        // One truecolour sequence per character, plus the leading bold and the
+        // trailing reset.
+        assert_eq!(painted.matches("\x1b[38;2;").count(), 7);
+    }
+
+    #[test]
+    fn text_measurement_grows_with_length() {
+        // Skip where no candidate font is installed rather than fail a machine
+        // that has none: this checks arithmetic, not font availability.
+        let Some(font) = load_font() else {
+            return;
+        };
+        assert_eq!(measure_text(&font, "", 20.0), 0.0);
+        let short = measure_text(&font, "a", 20.0);
+        let long = measure_text(&font, "aaaa", 20.0);
+        assert!(long > short, "{long} should exceed {short}");
     }
 }
