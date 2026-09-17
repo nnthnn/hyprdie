@@ -96,6 +96,8 @@ hyprdie --post-cmd 'systemctl poweroff'   # ... and power off afterwards
 hyprdie --post-cmd 'systemctl reboot'
 hyprdie --dry-run                         # show the overlay, close nothing
 hyprdie --config /path/to/config.toml     # use a specific config file
+hyprdie --help                            # option list
+hyprdie --version                         # print the version
 ```
 
 `--dry-run` is the safe way to see what it does before you bind it to a key.

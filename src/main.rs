@@ -656,6 +656,17 @@ fn title_line(color: bool) -> String {
     )
 }
 
+/// The `--version` line. The version comes from `Cargo.toml` at compile time,
+/// so it can't drift from the released binary.
+fn version_line(color: bool) -> String {
+    format!("🪦 {} {}", wordmark(color), env!("CARGO_PKG_VERSION"))
+}
+
+fn print_version() {
+    let color = color_enabled(std::io::stdout().is_terminal());
+    println!("{}", version_line(color));
+}
+
 fn print_help() {
     let color = color_enabled(std::io::stdout().is_terminal());
     println!("{}", title_line(color));
@@ -686,6 +697,7 @@ fn print_help() {
         "Read configuration from PATH",
     );
     option_row(color, "-h, --help", None, "Print this help");
+    option_row(color, "-V, --version", None, "Print version");
 }
 
 /// One `Options:` row. The flags and value are painted separately so the value
@@ -726,12 +738,13 @@ struct CliOptions {
     config_path: Option<PathBuf>,
 }
 
-/// The result of parsing arguments. `Help` is not an error: it's a request to
-/// print usage and exit successfully.
+/// What the parser decided the arguments mean. `Help` and `Version` are not
+/// errors: they're requests to print and exit successfully.
 #[derive(Debug, PartialEq, Eq)]
 enum CliOutcome {
     Options(CliOptions),
     Help,
+    Version,
 }
 
 /// A command-line parse failure. A typed error rather than a `String` keeps the
@@ -774,6 +787,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOutcome, CliE
                 ));
             }
             "--help" | "-h" => return Ok(CliOutcome::Help),
+            "--version" | "-V" => return Ok(CliOutcome::Version),
             unknown => return Err(CliError::UnknownOption(unknown.to_owned())),
         }
     }
@@ -785,6 +799,10 @@ fn cli_options() -> CliOptions {
         Ok(CliOutcome::Options(options)) => options,
         Ok(CliOutcome::Help) => {
             print_help();
+            process::exit(0);
+        }
+        Ok(CliOutcome::Version) => {
+            print_version();
             process::exit(0);
         }
         Err(error) => {
@@ -1554,6 +1572,22 @@ mod tests {
     fn help_is_not_an_error() {
         assert_eq!(parse_args([String::from("--help")]), Ok(CliOutcome::Help));
         assert_eq!(parse_args([String::from("-h")]), Ok(CliOutcome::Help));
+    }
+
+    #[test]
+    fn version_is_not_an_error() {
+        assert_eq!(
+            parse_args([String::from("--version")]),
+            Ok(CliOutcome::Version)
+        );
+        assert_eq!(parse_args([String::from("-V")]), Ok(CliOutcome::Version));
+    }
+
+    #[test]
+    fn version_line_reports_the_crate_version() {
+        let plain = version_line(false);
+        assert!(plain.contains(env!("CARGO_PKG_VERSION")), "{plain}");
+        assert!(plain.contains("hyprdie"), "{plain}");
     }
 
     #[test]
