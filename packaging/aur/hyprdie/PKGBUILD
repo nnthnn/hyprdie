@@ -1,0 +1,38 @@
+# Maintainer: Nathan Greenhaw <me@nathang.me>
+pkgname=hyprdie
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Graceful shutdown screen for Hyprland"
+arch=('x86_64' 'aarch64')
+url="https://github.com/nnthnn/hyprdie"
+license=('MIT')
+depends=('xkbcommon')
+makedepends=('rust')
+optdepends=('hyprland: required at runtime to close the session')
+# The release workflow rewrites both of these to point at the tagged release
+# asset and its checksum; the values here are for a local build of the tag.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --frozen --release
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --frozen
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/hyprdie" "$pkgdir/usr/bin/hyprdie"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 config.example.toml "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
+}
