@@ -35,8 +35,7 @@ The `pre-commit` hook auto-formats staged `.rs` files; `pre-push` runs
 `cargo fmt --all --check` and the clippy command above, so the local checks
 match CI's lint job.
 
-Toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust 1.98.1
-+ rustfmt + clippy). Building needs **xkbcommon** headers (`libxkbcommon-dev` on
+Building needs **xkbcommon** headers (`libxkbcommon-dev` on
 Debian, `xkbcommon` on Arch) because `smithay-client-toolkit`'s build script
 `pkg-config`s it. CI runs all three jobs in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml); keep them green.
