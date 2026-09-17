@@ -17,6 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # smithay-client-toolkit's build script pkg-configs xkbcommon, and it runs
+      # even for `cargo check`, so the lint job needs the headers as well.
+      - name: Install xkbcommon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.98.1
         with:
