@@ -159,4 +159,4 @@ no packaging. [`TODO.md`](TODO.md) tracks what's next.
 
 ## Licence
 
-Not chosen yet. There is no `LICENSE` file in the repository.
+MIT — see [`LICENSE`](LICENSE).
