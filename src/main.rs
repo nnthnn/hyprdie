@@ -646,12 +646,19 @@ fn wordmark(color: bool) -> String {
     out
 }
 
+/// The banner line at the top of `--help`. The tombstone sits outside the
+/// gradient: terminals render emoji in their own colours, so there's nothing
+/// useful to tint.
+fn title_line(color: bool) -> String {
+    format!(
+        "🪦 {} — a graceful shutdown screen for Hyprland",
+        wordmark(color)
+    )
+}
+
 fn print_help() {
     let color = color_enabled(std::io::stdout().is_terminal());
-    println!(
-        "{} — a graceful shutdown screen for Hyprland",
-        wordmark(color)
-    );
+    println!("{}", title_line(color));
     println!();
     println!(
         "{} {}",
@@ -1586,6 +1593,15 @@ mod tests {
     #[test]
     fn wordmark_is_plain_without_colour() {
         assert_eq!(wordmark(false), "hyprdie");
+    }
+
+    #[test]
+    fn title_line_has_the_tombstone_and_wordmark() {
+        let plain = title_line(false);
+        assert!(plain.starts_with('🪦'), "{plain}");
+        assert!(plain.contains("hyprdie"), "{plain}");
+        // Colour, when on, tints the wordmark but never the tombstone.
+        assert!(title_line(true).contains("🪦"));
     }
 
     #[test]
