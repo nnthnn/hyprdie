@@ -135,19 +135,22 @@ The images the project uses live in [`assets/`](assets/):
 
 | File | Used for |
 | --- | --- |
-| `icon.svg`, `icon-{16..512}.png` | App icon |
+| `icon-{128,256,512}.png` | App icon — the shaded tombstone render |
+| `icon.svg`, `icon-64.png` | App icon — flat tombstone with the skull |
+| `icon-simple.svg`, `icon-{16,24,32,48}.png` | App icon — tombstone without the skull |
 | `background.png` | Default overlay background |
 | `wordmark-transparent.png` | README and web — light theme |
 | `wordmark-transparent-inverted.png` | README and web — dark theme |
 | `hero.png` | The README image above |
 
+The icon ships in three cuts, all cut from the same render at the same scale: the
+shaded render at 128px and up, the same tombstone flattened at 64px, and the same
+tombstone with the skull left off at 48px and below, where the skull stops
+resolving.
+
 None of this is wired into the build yet — nothing is embedded in the binary and
 there's no install step, so the icon and background are not picked up
 automatically.
-
-[`logos/`](logos/) is the design record behind them: the candidates, the
-generation pipeline, and the size studies, browsable at
-[`logos/index.html`](logos/index.html).
 
 ## Status
 

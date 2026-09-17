@@ -1,9 +1,0 @@
-# Live node inventory dumped from the running ComfyUI — machine-specific.
-object_info.json
-
-# Generated workflows and images
-out/
-*.png
-
-__pycache__/
-*.pyc
