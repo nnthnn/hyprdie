@@ -57,25 +57,29 @@ Any chord works — that one is only an example. For a plain logout, leave
 `--post-cmd` off and hyprdie will close everything and exit by itself.
 
 **Why `--post-cmd` rather than `&&`:** the post command runs *before* Hyprland
-exits. Commands like `systemctl reboot` need the session to still be active when
-they ask logind/polkit for authorisation, and session teardown races them if you
-exit first. Chaining them in a shell loses that ordering.
+exits, and hyprdie waits for it to finish (up to 30 seconds) before exiting.
+Commands like `systemctl reboot` need the session to still be active when they
+ask logind/polkit for authorisation, and session teardown races them if you exit
+first. Chaining them in a shell loses that ordering.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
 | `Esc` | Cancel. Closes nothing, leaves the session running. |
-| `F` | Force. `SIGKILL`s every tracked process at once. |
+| `F` | Force. `SIGKILL`s every tracked process at once, then continues the shutdown. |
 
-Note that `F` is not "force the shutdown": it skips both `commands.post` and the
-`hyprctl dispatch exit`, so you're left in an empty session. It's an escape hatch
-for a wedged app, not a faster poweroff.
+`F` only changes *how* apps close — it skips the graceful
+`closewindow`/`SIGTERM`/retry sequence. The post command and the session exit
+still run afterwards, exactly as when apps close on their own, so it's safe to
+use on a wedged app.
 
 ## How it works
 
 1. Collects the session's processes, preferring the **systemd session cgroup** over
-   a process-tree walk — the walk can miss apps that have been reparented.
+   a process-tree walk — the walk can miss apps that have been reparented. It
+   excludes Hyprland's own ancestors (the display manager's session helper and the
+   launcher), so it never tears down the session out from under itself.
 2. Picks up **layer surfaces** (bars, notification daemons) via `hyprctl -j layers`
    so they don't outlive the session.
 3. Asks each window to close with `hyprctl dispatch closewindow`, and sends
