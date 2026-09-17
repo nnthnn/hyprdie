@@ -1,0 +1,178 @@
+name: Release
+
+# Cut a release by pushing a `vX.Y.Z` tag; the workflow does the rest:
+#   1. checks the tag matches Cargo.toml,
+#   2. attaches a stable source tarball (git archive) to the GitHub release,
+#   3. regenerates PKGBUILD/.SRCINFO and pushes them to the AUR.
+#
+# Unlike GitHub's auto-generated /archive/ tarballs, a release asset's bytes
+# (and therefore its checksum) do not change, so the AUR package stays buildable.
+#
+# AUR publishing is optional: when AUR_SSH_PRIVATE_KEY is unset the AUR job is
+# skipped and only the GitHub release is published.
+#   AUR_SSH_PRIVATE_KEY  private key whose public half is registered to the AUR
+#                        account that owns the hyprdie package.
+#   AUR_COMMIT_EMAIL     (optional) commit author email for AUR pushes
+#                        (defaults to github-actions[bot]@users.noreply.github.com).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Build source tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and validate version
+        id: meta
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$cargo_version" ] || [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version '${cargo_version}'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build stable source tarball
+        id: tarball
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          tarball="hyprdie-${version}.tar.gz"
+          # --prefix keeps the extracted directory identical to GitHub's
+          # /archive/ tarball, so the PKGBUILD's `cd "$pkgname-$pkgver"` is valid.
+          git archive --format=tar.gz --prefix="hyprdie-${version}/" -o "$tarball" HEAD
+          sha256="$(sha256sum "$tarball" | cut -d' ' -f1)"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "Built ${tarball} (sha256 ${sha256})"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          tarball="hyprdie-${version}.tar.gz"
+          if gh release view "v${version}" >/dev/null 2>&1; then
+            gh release upload "v${version}" "$tarball" --clobber
+          else
+            gh release create "v${version}" "$tarball" \
+              --title "v${version}" \
+              --generate-notes
+          fi
+
+  preflight:
+    name: Check AUR credentials
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check for AUR_SSH_PRIVATE_KEY
+        id: check
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AUR_SSH_PRIVATE_KEY is not set; skipping the AUR publish job."
+          fi
+
+  aur:
+    name: Publish to AUR
+    needs: [source, preflight]
+    if: ${{ needs.preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # makepkg only exists on Arch; run the packaging steps in an Arch container.
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install git and OpenSSH
+        run: pacman -Syu --noconfirm --needed --noprogressbar git openssh
+
+      - uses: actions/checkout@v4
+
+      - name: Update PKGBUILD and regenerate .SRCINFO
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SHA256: ${{ needs.source.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          cd packaging/aur/hyprdie
+          tarball="hyprdie-${VERSION}.tar.gz"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${tarball}"
+          sed -i \
+            -e "s|^pkgver=.*|pkgver=${VERSION}|" \
+            -e "s|^pkgrel=.*|pkgrel=1|" \
+            -e "s|^source=.*|source=(\"${tarball}::${url}\")|" \
+            -e "s|^sha256sums=.*|sha256sums=('${SHA256}')|" \
+            PKGBUILD
+          # makepkg refuses to run as root; regenerate .SRCINFO as a normal user.
+          useradd -m builder
+          chown -R builder .
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+
+          # Fail loudly rather than push a stale/mismatched package to the AUR.
+          grep -q "^[[:space:]]*pkgver = ${VERSION}$" .SRCINFO
+          grep -q "${SHA256}" .SRCINFO
+
+      - name: Push to AUR
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_COMMIT_EMAIL: ${{ secrets.AUR_COMMIT_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::AUR_SSH_PRIVATE_KEY secret is not set"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null
+
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          repo_url="ssh://aur@aur.archlinux.org/hyprdie.git"
+          rm -rf /tmp/aur
+          # AUR creates the repo on demand, but fall back to a local init so the
+          # very first publish still works if the clone of an empty repo fails.
+          if ! git clone "$repo_url" /tmp/aur; then
+            mkdir -p /tmp/aur
+            git -C /tmp/aur init -q
+            git -C /tmp/aur remote add origin "$repo_url"
+          fi
+          cp packaging/aur/hyprdie/PKGBUILD /tmp/aur/PKGBUILD
+          cp packaging/aur/hyprdie/.SRCINFO /tmp/aur/.SRCINFO
+
+          cd /tmp/aur
+          git config user.name 'hyprdie release bot'
+          git config user.email "${AUR_COMMIT_EMAIL:-github-actions[bot]@users.noreply.github.com}"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR package already up to date; nothing to push."
+            exit 0
+          fi
+          git commit -m "Update to ${VERSION}"
+          # HEAD:master is independent of whatever init.defaultBranch produced.
+          git push origin HEAD:master

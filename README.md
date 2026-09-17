@@ -71,6 +71,24 @@ To have those checks run for you, enable the tracked git hooks once:
 `pre-push` runs the formatting and clippy checks before anything leaves your
 machine. Both are just `cargo` invocations — nothing extra to install.
 
+## Install
+
+hyprdie isn't published to the AUR yet, so for now build it from source as
+above. The AUR packaging the release workflow will publish lives in
+[`packaging/aur/hyprdie`](packaging/aur/hyprdie).
+
+**System-wide install:**
+
+```sh
+sudo install -Dm755 target/release/hyprdie /usr/local/bin/
+```
+
+**User-local install** (no elevated privileges):
+
+```sh
+cp target/release/hyprdie ~/.local/bin/
+```
+
 ## Usage
 
 ```sh

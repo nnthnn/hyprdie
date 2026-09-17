@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 description = "A graceful shutdown screen for Hyprland"
+authors = ["Nathan Greenhaw <me@nathang.me>"]
 license = "MIT"
 repository = "https://github.com/nnthnn/hyprdie"
 readme = "README.md"
