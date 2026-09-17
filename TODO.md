@@ -26,6 +26,8 @@ Prioritized backlog for hyprdie. Higher up = do sooner.
 
 ## Packaging / hygiene
 
+- [x] Git hooks: `pre-commit` formats staged Rust files, `pre-push` runs the
+      fmt/clippy checks CI runs (`./install-hooks.sh` to enable).
 - [ ] README: usage, config reference, and a Hyprland keybind example.
 - [ ] Install script / packaging (e.g. `cargo install` instructions, systemd).
 - [ ] `cargo fmt` + `clippy` clean, and add unit tests for config/CLI parsing,
